@@ -1,66 +1,74 @@
-## Foundry
+# Aave V1 From Scratch
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+This project is an educational rebuild of the core ideas behind Aave V1.
 
-Foundry consists of:
+The goal is to recreate the protocol step by step from scratch using:
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+- Foundry
+- Solidity 0.8.30
+- OpenZeppelin Contracts
 
-## Documentation
+This is not a production implementation and should not be used with real funds. It is a learning project for understanding how a pool-based lending protocol works by implementing the main pieces one feature at a time.
 
-https://book.getfoundry.sh/
+## Inspiration
 
-## Usage
+The original Aave V1 protocol can be found here:
 
-### Build
+[aave/aave-protocol](https://github.com/aave/aave-protocol)
 
-```shell
-$ forge build
+This project uses the original protocol as a reference, but the code is intentionally simplified and rewritten for learning with modern Solidity and Foundry.
+
+## Project Docs
+
+The project is documented as a sequence of small steps:
+
+- [Introduction](docs/00-introduction.md)
+- [Project Setup](docs/01-project-setup.md)
+- [Deposit](docs/02-deposit.md)
+
+## Development
+
+Install dependencies:
+
+```bash
+forge install
 ```
 
-### Test
+Build:
 
-```shell
-$ forge test
+```bash
+forge build
 ```
 
-### Format
+Run tests:
 
-```shell
-$ forge fmt
+```bash
+forge test
 ```
 
-### Gas Snapshots
+## Status
 
-```shell
-$ forge snapshot
-```
+Work in progress. The current focus is rebuilding the first deposit flow before adding the more complex lending protocol mechanics.
 
-### Anvil
+## Connect With Me
 
-```shell
-$ anvil
-```
-
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+<p align="left">
+  <a href="https://x.com/rosarioborgesi">
+    <img src="https://img.shields.io/badge/twitter-000000?style=for-the-badge&logo=x&logoColor=white"/>
+  </a>
+  <a href="https://www.linkedin.com/in/rosarioborgesi/">
+    <img src="https://img.shields.io/badge/LinkedIn-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white"/>
+  </a>
+  <a href="mailto:borgesiros@gmail.com">
+    <img src="https://img.shields.io/badge/Email-D14836?style=for-the-badge&logo=gmail&logoColor=white"/>
+  </a>
+  <a href="https://www.youtube.com/@rosarioborgesi">
+    <img src="https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white"/>
+  </a>
+  <a href="https://farcaster.xyz/rosarioborgesi">
+    <img src="https://img.shields.io/badge/Farcaster-855DCD?style=for-the-badge"/>
+  </a>
+  <a href="https://medium.com/@rosarioborgesi/">
+    <img src="https://img.shields.io/badge/Medium-000000?style=for-the-badge&logo=medium&logoColor=white"/>
+  </a>
+</p>
