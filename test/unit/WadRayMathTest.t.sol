@@ -91,11 +91,9 @@ contract WadRayMathTest is Test {
     }
 
     function testWadMulRoundsHalfUp() public view {
-        // 0.499999999999999999 rounds down to 0
         // (1 * (0.5e18 - 1) + 0.5e18) / 1e18 = 0
         assertEq(math.wadMul(1, HALF_WAD - 1), 0);
 
-        // 0.5 rounds up to 1
         // (1 * 0.5e18 + 0.5e18) / 1e18 = 1
         assertEq(math.wadMul(1, HALF_WAD), 1);
     }
