@@ -125,11 +125,9 @@ contract WadRayMathTest is Test {
     }
 
     function testRayMulRoundsHalfUp() public view {
-        // 0.499999999999999999999999999 rounds down to 0
         // (1 * (0.5e27 - 1) + 0.5e27) / 1e27 = 0
         assertEq(math.rayMul(1, HALF_RAY - 1), 0);
 
-        // 0.5 rounds up to 1
         // (1 * 0.5e27 + 0.5e27) / 1e27 = 1
         assertEq(math.rayMul(1, HALF_RAY), 1);
     }
