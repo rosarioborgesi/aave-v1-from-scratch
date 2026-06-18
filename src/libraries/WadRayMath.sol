@@ -80,7 +80,7 @@ library WadRayMath {
 
     /**
      * @dev calculates base^exp. The code uses the ModExp precompile
-     * @return base^exp, in ray
+     * @return z Returns base^exp, in ray
      */
     function rayPow(uint256 x, uint256 n) internal pure returns (uint256 z) {
         z = n % 2 != 0 ? x : RAY;
