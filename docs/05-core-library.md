@@ -736,41 +736,260 @@ struct UserReserveData {
 
 ### principalBorrowBalance
 
-`principalBorrowBalance` is the amount borrowed by the user before adding newly accrued interest.
+`principalBorrowBalance` is the user's borrowed principal before adding newly accrued interest.
 
-If the user has no borrow position, this value is zero.
+It represents the amount of debt stored in the protocol at the user's last update.
+
+Example:
+
+```text
+Alice borrows 1,000 DAI
+```
+
+Immediately after the borrow:
+
+```text
+principalBorrowBalance = 1,000 DAI
+```
+
+If interest accrues and Alice's current debt later becomes 1,050 DAI, the stored principal may still be:
+
+```text
+principalBorrowBalance = 1,000 DAI
+```
+
+while the current compounded borrow balance is:
+
+```text
+1,050 DAI
+```
+
+The current debt is calculated from the principal plus the interest accumulated since the last user update.
+
+Conceptually:
+
+```text
+currentBorrowBalance = principalBorrowBalance * accumulatedInterestFactor
+```
+
+When Alice performs another action, such as borrowing again or repaying, the protocol can update the stored principal to include the accrued interest.
+
+For example:
+
+```text
+Previous principal = 1,000 DAI
+Accrued interest = 50 DAI
+New stored principal = 1,050 DAI
+```
+
+If the user has no borrow position:
+
+```text
+principalBorrowBalance = 0
+```
+
+---
 
 ### lastVariableBorrowCumulativeIndex
 
-`lastVariableBorrowCumulativeIndex` stores the variable borrow index applied to the user the last time their borrow state was updated.
+`lastVariableBorrowCumulativeIndex` is the reserve variable borrow index recorded for the user when their variable debt was last updated.
 
-It is used to calculate how much variable debt has grown since the last user update.
+It acts as the user's checkpoint.
+
+The reserve has a global variable borrow index that grows as variable interest accrues. The user stores the value of that index at the moment their position is created or updated.
+
+The current variable debt can then be calculated using:
+
+```text
+currentDebt = principalBorrowBalance * currentReserveVariableBorrowIndex / userLastVariableBorrowIndex
+```
+
+Example:
+
+```text
+Alice principal debt = 1,000 DAI
+Alice last variable borrow index = 1.00
+Current reserve variable borrow index = 1.08
+```
+
+Then:
+
+```text
+currentDebt = 1,000 * 1.08 / 1.00
+```
+
+```text
+currentDebt = 1,080 DAI
+```
+
+Alice accumulated 80 DAI of variable interest.
+
+Suppose Bob borrowed later, when the reserve variable borrow index was already `1.04`:
+
+```text
+Bob principal debt = 1,000 DAI
+Bob last variable borrow index = 1.04
+Current reserve variable borrow index = 1.08
+```
+
+Then:
+
+```text
+currentDebt = 1,000 * 1.08 / 1.04
+```
+
+```text
+currentDebt ≈ 1,038.46 DAI
+```
+
+Bob only pays interest for the growth that occurred after he borrowed.
+
+This field prevents users from being charged interest that accumulated before their position existed.
+
+---
 
 ### originationFee
 
-`originationFee` is the fee accumulated by the user when borrowing.
+`originationFee` is the borrowing fee charged when the user opens or increases a borrow position.
+
+It is stored separately from the principal borrow balance.
+
+Example:
+
+```text
+Alice borrows 1,000 DAI
+Origination fee = 0.25%
+```
+
+The fee is:
+
+```text
+1,000 DAI * 0.25% = 2.5 DAI
+```
+
+The user's data could then contain:
+
+```text
+principalBorrowBalance = 1,000 DAI
+originationFee = 2.5 DAI
+```
+
+The user's total obligation is therefore not only the borrowed principal and accrued interest, but also the outstanding origination fee.
+
+Conceptually:
+
+```text
+totalAmountOwed = compoundedBorrowBalance + originationFee
+```
+
+For example:
+
+```text
+Compounded borrow balance = 1,050 DAI
+Origination fee = 2.5 DAI
+```
+
+```text
+Total obligation = 1,052.5 DAI
+```
+
+The exact fee percentage is defined by the protocol configuration.
+
+---
 
 ### stableBorrowRate
 
-`stableBorrowRate` is the stable rate at which the user borrowed.
+`stableBorrowRate` is the annual rate associated with the user's stable borrow position.
 
-If this value is greater than zero, the user has a stable borrow position.
+It is expressed in ray precision.
 
-If this value is zero, the user is treated as having a variable borrow position.
+Example:
+
+```text
+7% annual stable borrow rate = 0.07 ray = 7e25
+```
+
+Suppose Alice borrows:
+
+```text
+1,000 DAI at a stable rate of 7%
+```
+
+Her user data stores:
+
+```text
+principalBorrowBalance = 1,000 DAI
+stableBorrowRate = 7e25
+```
+
+After one year, her debt is calculated using compounded interest:
+
+```text
+currentDebt ≈ 1,000 DAI * 1.0725
+```
+
+```text
+currentDebt ≈ 1,072.5 DAI
+```
+
+The exact result depends on the compounding formula and rounding.
+
+The stable borrow rate is user-specific. Two users can have different stable rates for the same reserve.
+
+Example:
+
+```text
+Alice borrowed earlier at 5%
+Bob borrowed later at 8%
+```
+
+Their positions may contain:
+
+```text
+Alice stableBorrowRate = 5e25
+Bob stableBorrowRate = 8e25
+```
+
+Even though they borrowed the same asset, their debt grows using different rates.
+
+In this implementation:
+
+```text
+stableBorrowRate > 0
+```
+
+means the user has a stable-rate position.
+
+If:
+
+```text
+stableBorrowRate = 0
+```
+
+the borrow balance is treated as variable-rate debt, and the protocol uses the reserve and user variable borrow indexes instead.
+
+---
 
 ### lastUpdateTimestamp
 
-`lastUpdateTimestamp` is the last time the user's reserve data was updated.
+`lastUpdateTimestamp` records the last time the user's reserve data was updated.
+
+It is used to determine how much time has passed when calculating stable compounded interest.
+
+---
 
 ### useAsCollateral
 
 `useAsCollateral` defines whether the user's deposit in this reserve is enabled as collateral.
 
-For example, after a user's first deposit, the protocol can mark the reserve as collateral:
+For example, after a user's first deposit:
 
 ```text
 useAsCollateral = true
 ```
+
+This means the deposited asset can contribute to the user's borrowing power.
+
 
 # init
 
@@ -1344,10 +1563,7 @@ user last variable borrow cumulative index
 The formula is:
 
 ```text
-cumulatedInterest =
-    compoundedVariableInterest
-    * reserveLastVariableBorrowIndex
-    / userLastVariableBorrowIndex
+cumulatedInterest = compoundedVariableInterest * reserveLastVariableBorrowIndex / userLastVariableBorrowIndex
 ```
 
 In Solidity:
@@ -1370,8 +1586,7 @@ currentDebt = principalDebt * cumulatedInterest
 In Solidity:
 
 ```solidity
-compoundedBalance =
-    principalBorrowBalanceRay.rayMul(cumulatedInterest).rayToWad();
+compoundedBalance = principalBorrowBalanceRay.rayMul(cumulatedInterest).rayToWad();
 ```
 
 ## Rounding Protection
