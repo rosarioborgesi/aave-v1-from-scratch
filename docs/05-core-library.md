@@ -108,9 +108,12 @@ struct ReserveData {
 
 ### lastLiquidityCumulativeIndex
 
+Before reading this check out [Aave index based accounting](./04-index-based-accounting.md).
+
 `lastLiquidityCumulativeIndex` is the liquidity index of the reserve.
 
 It tracks how much the deposited liquidity has grown over time.
+
 
 It is expressed in ray precision:
 
@@ -140,17 +143,86 @@ Example:
 1.10 ray = reserve grew by 10%
 ```
 
-If Alice deposited 100 DAI when the index was 1.00, and later the normalized income is 1.05, her position is worth around:
+So, instead of updating every depositor’s balance every second, Aave updates one global number for the reserve.
+
+Then each user’s current balance can be derived from:
 
 ```text
-100 * 1.05 = 105 DAI
+userBalance = userPrincipal * currentIndex / userIndex
 ```
 
-So the index tracks growth due to interest.
+Suppose Alice deposited 100 DAI when the relevant index was `1.00`, and the current normalized income later becomes `1.05`.
+
+Her balance is worth approximately:
+
+```text
+100 DAI * 1.05 / 1.00 = 105 DAI
+```
+
+The additional 5 DAI represents accrued interest.
+
+So another way to describe it is:
+
+lastLiquidityCumulativeIndex is the reserve-wide multiplier that records how much suppliers’ deposits have grown from accumulated interest.
+
+#### Why It Can Only Grow
+
+The liquidity cumulative index is updated using the linear interest accumulated since the previous reserve update:
+
+```solidity
+uint256 cumulatedLiquidityInterest =
+    calculateLinearInterest(
+        _self.currentLiquidityRate,
+        _self.lastUpdateTimestamp
+    );
+
+_self.lastLiquidityCumulativeIndex =
+    cumulatedLiquidityInterest.rayMul(
+        _self.lastLiquidityCumulativeIndex
+    );
+```
+
+`calculateLinearInterest()` returns an interest factor based on:
+
+```text
+linearInterest = 1 + rate * elapsedTime
+```
+
+As long as:
+
+```text
+rate >= 0
+elapsedTime >= 0
+```
+
+the linear interest factor is always greater than or equal to `1.0`.
+
+Therefore:
+
+```text
+newIndex = oldIndex * valueGreaterThanOrEqualTo1
+```
+
+This means the new liquidity cumulative index can only:
+
+```text
+stay the same
+```
+
+or:
+
+```text
+increase
+```
+
+It cannot decrease unless the protocol supports negative liquidity rates, which this design does not.
+
+This does not mean the reserve's available liquidity can only grow. Available liquidity can decrease when users borrow or redeem assets. The liquidity cumulative index only tracks the cumulative interest growth of deposited funds.
+
 
 ### currentLiquidityRate
 
-`currentLiquidityRate` is the current supply rate of the reserve.
+`currentLiquidityRate` is the current annual rate earned by liquidity providers.
 
 It is expressed in ray precision.
 
@@ -160,49 +232,189 @@ Example:
 5% annual liquidity rate = 0.05 ray = 5e25
 ```
 
-This rate is used to calculate how much liquidity providers earn over time.
+Suppose Alice supplies 1,000 DAI and the liquidity rate remains at 5% for one year.
+
+Using linear interest, her position would grow approximately to:
+
+```text
+1,000 DAI * 1.05 = 1,050 DAI
+```
+
+The rate can change whenever the reserve state changes because it depends on factors such as available liquidity and total borrowed liquidity.
+
+---
 
 ### totalBorrowsStable
 
-`totalBorrowsStable` is the total amount borrowed from the reserve at a stable rate.
+`totalBorrowsStable` is the total principal borrowed from the reserve using stable interest rates.
 
-It is expressed in the reserve asset decimals.
+It is expressed using the decimals of the underlying asset.
+
+Suppose three users have stable DAI loans:
+
+```text
+Alice = 100 DAI
+Bob = 250 DAI
+Carol = 150 DAI
+```
+
+Then:
+
+```text
+totalBorrowsStable = 100 + 250 + 150
+totalBorrowsStable = 500 DAI
+```
+
+Because DAI has 18 decimals, the stored value is:
+
+```text
+500e18
+```
+
+This value represents the aggregate stable debt of the reserve, not the debt of a single user.
+
+---
+
+### totalBorrowsVariable
+
+`totalBorrowsVariable` is the total principal borrowed from the reserve using variable interest rates.
+
+It is also expressed using the decimals of the underlying asset.
+
+Suppose:
+
+```text
+Alice variable debt = 200 DAI
+Bob variable debt = 300 DAI
+```
+
+Then:
+
+```text
+totalBorrowsVariable = 500 DAI
+```
+
+For an 18-decimal token, the stored value is:
+
+```text
+500e18
+```
+
+The total amount borrowed from the reserve is:
+
+```text
+totalBorrows =
+    totalBorrowsStable
+    + totalBorrowsVariable
+```
+
+For example:
+
+```text
+totalBorrowsStable = 500 DAI
+totalBorrowsVariable = 500 DAI
+
+totalBorrows = 1,000 DAI
+```
+
+---
+
+### currentVariableBorrowRate
+
+`currentVariableBorrowRate` is the current annual interest rate applied to variable-rate borrowers.
+
+It is expressed in ray precision.
 
 Example:
 
 ```text
-If DAI has 18 decimals, totalBorrowsStable is expressed with 18 decimals.
+8% annual variable borrow rate = 0.08 ray = 8e25
 ```
 
-### totalBorrowsVariable
+Suppose Alice has 1,000 DAI of variable debt and the variable rate remains at 8% for one year.
 
-`totalBorrowsVariable` is the total amount borrowed from the reserve at a variable rate.
+With compounded interest, her debt would become approximately:
 
-It is also expressed in the reserve asset decimals.
+```text
+1,000 DAI * 1.0833 = 1,083.3 DAI
+```
 
-### currentVariableBorrowRate
+The exact result depends on the compounded-interest implementation and rounding.
 
-`currentVariableBorrowRate` is the current variable borrow rate of the reserve.
+The variable rate can change over time as reserve utilization changes.
 
-It is expressed in ray precision.
+---
 
 ### currentStableBorrowRate
 
-`currentStableBorrowRate` is the current stable borrow rate of the reserve.
+`currentStableBorrowRate` is the current stable rate offered to users who open a new stable-rate borrow position.
 
 It is expressed in ray precision.
+
+Example:
+
+```text
+7% annual stable borrow rate = 0.07 ray = 7e25
+```
+
+Suppose Alice borrows 1,000 DAI when the current stable borrow rate is 7%.
+
+Her stable borrow position records approximately:
+
+```text
+stableBorrowRate = 7%
+```
+
+If the reserve later offers a stable rate of 9%, Alice's existing position does not automatically become 9%. Her user-specific stable borrow rate remains the rate associated with her position unless the protocol updates or rebalances it.
+
+---
 
 ### currentAverageStableBorrowRate
 
-`currentAverageStableBorrowRate` is the weighted average stable rate of all stable borrows in the reserve.
+`currentAverageStableBorrowRate` is the weighted average rate of all stable-rate loans in the reserve.
 
 It is expressed in ray precision.
 
+It is weighted by the size of each stable borrow.
+
+Suppose:
+
+```text
+Alice borrowed 100 DAI at 5%
+Bob borrowed 300 DAI at 9%
+```
+
+The weighted average is:
+
+```text
+averageStableRate =
+    (100 * 5% + 300 * 9%)
+    / (100 + 300)
+```
+
+```text
+averageStableRate =
+    (5 + 27) / 400
+    = 8%
+```
+
+In ray precision:
+
+```text
+currentAverageStableBorrowRate = 8e25
+```
+
+Bob's loan has a larger effect on the average because Bob borrowed more.
+
+This rate is used when calculating reserve-level interest rates and stable debt accounting.
+
+---
+
 ### lastVariableBorrowCumulativeIndex
 
-`lastVariableBorrowCumulativeIndex` is the variable borrow index of the reserve.
+`lastVariableBorrowCumulativeIndex` is the stored variable borrow index of the reserve.
 
-It tracks how much variable debt has grown over time.
+It tracks the cumulative growth of variable-rate debt.
 
 It is expressed in ray precision and starts at:
 
@@ -210,9 +422,46 @@ It is expressed in ray precision and starts at:
 1e27
 ```
 
+That represents:
+
+```text
+1.0
+```
+
+Example:
+
+```text
+1.00 ray = no variable interest accumulated
+1.08 ray = variable debt has grown by approximately 8%
+1.15 ray = variable debt has grown by approximately 15%
+```
+
+Suppose Alice borrowed 1,000 DAI when her user variable borrow index was `1.00`.
+
+Later, the reserve variable borrow index becomes `1.08`.
+
+Her current debt is approximately:
+
+```text
+1,000 DAI * 1.08 / 1.00 = 1,080 DAI
+```
+
+If Alice instead entered when the index was `1.04`, and the current index is `1.08`, her debt is approximately:
+
+```text
+1,000 DAI * 1.08 / 1.04
+≈ 1,038.46 DAI
+```
+
+Only the growth since Alice's borrow checkpoint is applied to her position.
+
+---
+
 ### baseLTVasCollateral
 
-`baseLTVasCollateral` defines how much a user can borrow against this asset.
+`baseLTVasCollateral` defines the maximum amount that can normally be borrowed against the value of this collateral.
+
+It is expressed as a percentage.
 
 Example:
 
@@ -220,11 +469,34 @@ Example:
 baseLTVasCollateral = 75
 ```
 
-means the user can borrow up to 75% of the collateral value.
+Suppose Alice deposits collateral worth $1,000.
+
+The maximum borrow value based on the LTV is:
+
+```text
+$1,000 * 75% = $750
+```
+
+Alice can therefore borrow up to approximately $750, subject to the other protocol checks.
+
+Another example:
+
+```text
+Collateral value = $2,000
+Base LTV = 60%
+
+Maximum borrowing power = $1,200
+```
+
+The LTV is used to determine borrowing capacity. It is not the same as the liquidation threshold.
+
+---
 
 ### liquidationThreshold
 
-`liquidationThreshold` defines the threshold at which a user can be liquidated.
+`liquidationThreshold` determines when a borrow position becomes undercollateralized and eligible for liquidation.
+
+It is expressed as a percentage of the collateral value.
 
 Example:
 
@@ -232,53 +504,231 @@ Example:
 liquidationThreshold = 80
 ```
 
-means the user becomes liquidatable when the borrow position exceeds 80% of the collateral value.
+Suppose Alice has collateral worth $1,000.
+
+The liquidation-adjusted collateral value is:
+
+```text
+$1,000 * 80% = $800
+```
+
+If Alice's debt reaches or exceeds the relevant liquidation limit, her health factor can fall to `1` or below and the position can become liquidatable.
+
+For example:
+
+```text
+Collateral value = $1,000
+Liquidation threshold = 80%
+Debt value = $700
+```
+
+The position is still above the liquidation boundary.
+
+But if the collateral value falls to $850:
+
+```text
+$850 * 80% = $680
+```
+
+With debt still worth $700, the position is now under the liquidation threshold.
+
+The liquidation threshold is normally higher than the base LTV:
+
+```text
+Base LTV = 75%
+Liquidation threshold = 80%
+```
+
+This creates a safety margin between the maximum normal borrowing capacity and liquidation.
+
+---
 
 ### liquidationBonus
 
-`liquidationBonus` is the extra collateral discount given to liquidators.
+`liquidationBonus` defines the extra collateral received by a liquidator as an incentive for repaying part of an unhealthy user's debt.
+
+The exact stored representation depends on the percentage convention used by the protocol.
+
+Conceptually, suppose the liquidation bonus is 5%.
+
+A liquidator repays:
+
+```text
+100 DAI of debt
+```
+
+Without a bonus, the liquidator would receive collateral worth:
+
+```text
+$100
+```
+
+With a 5% liquidation bonus, the liquidator receives collateral worth:
+
+```text
+$100 * 1.05 = $105
+```
+
+The additional $5 is the liquidation incentive.
+
+If your implementation stores the bonus as the complete multiplier, it may be represented as:
+
+```text
+105 = 105%
+```
+
+If it stores only the additional percentage, it may be represented as:
+
+```text
+5 = 5%
+```
+
+The functions using this field must follow the same convention consistently.
+
+---
 
 ### decimals
 
-`decimals` stores the number of decimals of the underlying reserve asset.
+`decimals` stores the number of decimal places used by the underlying reserve asset.
 
-Example:
+Examples:
 
 ```text
 DAI = 18 decimals
 USDC = 6 decimals
+WBTC = 8 decimals
 ```
+
+One DAI is represented as:
+
+```text
+1 DAI = 1e18
+```
+
+One USDC is represented as:
+
+```text
+1 USDC = 1e6
+```
+
+Suppose a user deposits 100 units.
+
+For DAI, the raw amount is:
+
+```text
+100e18
+```
+
+For USDC, the raw amount is:
+
+```text
+100e6
+```
+
+The protocol needs this information when converting and comparing amounts from assets with different decimal precision.
+
+---
 
 ### aTokenAddress
 
-`aTokenAddress` is the address of the aToken linked to the reserve.
+`aTokenAddress` is the address of the aToken associated with the reserve.
 
 Example:
 
 ```text
 DAI reserve -> aDAI
 USDC reserve -> aUSDC
+WETH reserve -> aWETH
 ```
 
-When a user deposits the underlying asset, the corresponding aToken is minted.
+Suppose Alice deposits:
+
+```text
+100 DAI
+```
+
+The protocol mints approximately:
+
+```text
+100 aDAI
+```
+
+The aToken represents Alice's deposit position and its accrued income.
+
+---
 
 ### interestRateStrategyAddress
 
-`interestRateStrategyAddress` is the address of the interest rate strategy contract used by the reserve.
+`interestRateStrategyAddress` is the address of the strategy contract responsible for calculating the reserve's interest rates.
 
-The interest rate strategy calculates:
+The strategy calculates values such as:
 
 ```text
-liquidity rate
-stable borrow rate
-variable borrow rate
+currentLiquidityRate
+currentStableBorrowRate
+currentVariableBorrowRate
 ```
+
+For example, suppose a reserve has:
+
+```text
+Available liquidity = 200 DAI
+Total borrows = 800 DAI
+Total liquidity = 1,000 DAI
+```
+
+The utilization rate is approximately:
+
+```text
+800 / 1,000 = 80%
+```
+
+The strategy can use this utilization rate to produce higher borrowing rates because most of the reserve liquidity is being used.
+
+A different reserve with only 20% utilization would generally receive lower borrowing rates.
+
+The precise relationship depends on the implementation of the interest rate strategy.
+
+---
 
 ### lastUpdateTimestamp
 
-`lastUpdateTimestamp` stores the last time the reserve state was updated.
+`lastUpdateTimestamp` stores the timestamp of the last reserve state update.
 
-It is used to calculate how much time has passed since the previous update.
+It is used to calculate the elapsed time for interest accumulation.
+
+Example:
+
+```text
+lastUpdateTimestamp = 1,700,000,000
+current block timestamp = 1,700,086,400
+```
+
+The elapsed time is:
+
+```text
+1,700,086,400 - 1,700,000,000
+= 86,400 seconds
+= 1 day
+```
+
+The protocol then uses this elapsed time when calculating linear or compounded interest.
+
+For example:
+
+```text
+annual rate = 5%
+elapsed time = 1 day
+```
+
+The approximate linear interest factor is:
+
+```text
+1 + 5% * (1 / 365)
+≈ 1.000136986
+```
+
+The timestamp itself is not an economic amount, but it determines how much interest has accumulated.
 
 ### borrowingEnabled
 
