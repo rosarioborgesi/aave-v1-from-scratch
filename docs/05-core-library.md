@@ -112,7 +112,7 @@ Before reading this check out [Aave index based accounting](./04-index-based-acc
 
 `lastLiquidityCumulativeIndex` is the liquidity index of the reserve.
 
-It tracks how much the deposited liquidity has grown over time.
+It tracks the cumulative interest earned by suppliers in a reserve.
 
 
 It is expressed in ray precision:
@@ -164,60 +164,6 @@ The additional 5 DAI represents accrued interest.
 So another way to describe it is:
 
 lastLiquidityCumulativeIndex is the reserve-wide multiplier that records how much suppliers’ deposits have grown from accumulated interest.
-
-#### Why It Can Only Grow
-
-The liquidity cumulative index is updated using the linear interest accumulated since the previous reserve update:
-
-```solidity
-uint256 cumulatedLiquidityInterest =
-    calculateLinearInterest(
-        _self.currentLiquidityRate,
-        _self.lastUpdateTimestamp
-    );
-
-_self.lastLiquidityCumulativeIndex =
-    cumulatedLiquidityInterest.rayMul(
-        _self.lastLiquidityCumulativeIndex
-    );
-```
-
-`calculateLinearInterest()` returns an interest factor based on:
-
-```text
-linearInterest = 1 + rate * elapsedTime
-```
-
-As long as:
-
-```text
-rate >= 0
-elapsedTime >= 0
-```
-
-the linear interest factor is always greater than or equal to `1.0`.
-
-Therefore:
-
-```text
-newIndex = oldIndex * valueGreaterThanOrEqualTo1
-```
-
-This means the new liquidity cumulative index can only:
-
-```text
-stay the same
-```
-
-or:
-
-```text
-increase
-```
-
-It cannot decrease unless the protocol supports negative liquidity rates, which this design does not.
-
-This does not mean the reserve's available liquidity can only grow. Available liquidity can decrease when users borrow or redeem assets. The liquidity cumulative index only tracks the cumulative interest growth of deposited funds.
 
 
 ### currentLiquidityRate
@@ -303,9 +249,7 @@ For an 18-decimal token, the stored value is:
 The total amount borrowed from the reserve is:
 
 ```text
-totalBorrows =
-    totalBorrowsStable
-    + totalBorrowsVariable
+totalBorrows = totalBorrowsStable + totalBorrowsVariable
 ```
 
 For example:
@@ -759,7 +703,7 @@ In Aave V1, a frozen reserve allows limited actions such as repayments and redem
 A simplified mental model is:
 
 ```solidity
-mapping(address user => mapping(address reserve => UserReserveData userReserveData))
+mapping(address user => mapping(address reserve => UserReserveData userReserveData)) 
     internal s_usersReserveData;
 ```
 

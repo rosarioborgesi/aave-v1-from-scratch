@@ -16,8 +16,6 @@ Bob deposits 200 DAI
 Carol deposits 50 DAI
 ```
 
-Assume all three users deposit when the liquidity index is `1.00`.
-
 After some time, the reserve earns 5% interest.
 
 Without an index, the protocol would need to update every user's stored balance:
@@ -32,8 +30,7 @@ The protocol would need logic similar to:
 
 ```solidity
 for (uint256 i = 0; i < depositors.length; i++) {
-    balances[depositors[i]] =
-        balances[depositors[i]] * 105 / 100;
+    balances[depositors[i]] = balances[depositors[i]] * 105 / 100;
 }
 ```
 
@@ -100,10 +97,7 @@ Their current balances are calculated when needed.
 The general formula is:
 
 ```text
-currentBalance =
-    principalBalance
-    * currentReserveIndex
-    / userIndex
+currentBalance = principalBalance * currentReserveIndex / userIndex
 ```
 
 The `currentReserveIndex` represents the current reserve-wide growth.
@@ -284,10 +278,7 @@ return _balance
 Conceptually, this is:
 
 ```text
-currentBalance =
-    storedPrincipalBalance
-    * currentNormalizedIncome
-    / userIndex
+currentBalance = storedPrincipalBalance * currentNormalizedIncome / userIndex
 ```
 
 Suppose:
@@ -377,9 +368,7 @@ the interest factor is always greater than or equal to `1.0`.
 Therefore:
 
 ```text
-newIndex =
-    oldIndex
-    * valueGreaterThanOrEqualTo1
+newIndex = oldIndex * valueGreaterThanOrEqualTo1
 ```
 
 The index can only:
