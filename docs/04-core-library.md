@@ -108,7 +108,7 @@ struct ReserveData {
 
 ### lastLiquidityCumulativeIndex
 
-Before reading this check out [Aave index based accounting](./04-index-based-accounting.md).
+Deeper explanation of this field has been provided into [Aave index based accounting](./05-index-based-accounting.md).
 
 `lastLiquidityCumulativeIndex` is the liquidity index of the reserve.
 
@@ -1490,6 +1490,8 @@ This value is used when updating cumulative indexes.
 If total borrows are zero, there is no borrow-generated income, so reserve indexes do not need to be updated.
 
 # getCompoundedBorrowBalance
+
+For a deeper explanation of how current user debt is calculated, see [Compounded Borrow Balance](./06-compounded-borrow-balance.md).
 
 `getCompoundedBorrowBalance` calculates the current borrow balance of a user, including accrued interest.
 

@@ -247,6 +247,7 @@ library CoreLibrary {
 
     /**
      * @dev calculates the compounded borrow balance of a user
+     * It returns the user’s current debt including accrued interest.
      * @param _self the userReserve object
      * @param _reserve the reserve object
      * @return the user compounded borrow balance
@@ -256,7 +257,11 @@ library CoreLibrary {
         CoreLibrary.UserReserveData storage _self,
         CoreLibrary.ReserveData storage _reserve
     ) internal view returns (uint256) {
+        // _self.principalBorrowBalance is only the debt recorded at the user’s last update.
+        // The function calculates how much that debt has grown since then.
+
         if (_self.principalBorrowBalance == 0) {
+            // return 0 if the user has no debt
             return 0;
         }
 
@@ -265,14 +270,22 @@ library CoreLibrary {
         uint256 cumulatedInterest = 0;
 
         if (_self.stableBorrowRate > 0) {
+            // stableBorrowRate > 0 → stable-rate debt
+
+            // cumulatedInterest = (1 + stableRatePerSecond) ^ elapsedSeconds
             cumulatedInterest = calculateCompoundedInterest(_self.stableBorrowRate, _self.lastUpdateTimestamp);
         } else {
-            // variable interest
+            // stableBorrowRate == 0 → variable-rate debt
+
+            // 1. interestSinceReserveUpdate = (1 + currentVariableRatePerSecond) ^ elapsedSeconds
+            // 2. currentReserveVariableIndex = storedReserveVariableIndex * interestSinceReserveUpdate
+            // 3. userGrowthFactor = currentReserveVariableIndex / userLastVariableBorrowIndex
             cumulatedInterest = calculateCompoundedInterest(
                     _reserve.currentVariableBorrowRate, _reserve.lastUpdateTimestamp
                 ).rayMul(_reserve.lastVariableBorrowCumulativeIndex).rayDiv(_self.lastVariableBorrowCumulativeIndex);
         }
 
+        // currentDebt = principal * cumulatedInterest
         compoundedBalance = principalBorrowBalanceRay.rayMul(cumulatedInterest).rayToWad();
 
         if (compoundedBalance == _self.principalBorrowBalance) {
