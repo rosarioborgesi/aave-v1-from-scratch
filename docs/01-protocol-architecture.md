@@ -428,6 +428,25 @@ address core = addressesProvider.getLendingPoolCore();
 
 The provider is especially useful because different protocol components need to know where the other components are.
 
+Internally, the provider inherits from `AddressStorage`.
+
+`AddressStorage` contains the generic mapping:
+
+```solidity
+mapping(bytes32 => address) private s_addresses;
+```
+
+The provider then uses fixed keys like `LENDING_POOL`, `LENDING_POOL_CORE`, and `LENDING_POOL_CONFIGURATOR` to store and read each address.
+
+For example:
+
+```solidity
+_setAddress(LENDING_POOL_CORE, coreAddress);
+address core = getAddress(LENDING_POOL_CORE);
+```
+
+So `AddressStorage` handles the generic key-value storage, while `LendingPoolAddressesProvider` exposes clearer protocol-specific functions such as `setLendingPoolCore()` and `getLendingPoolCore()`.
+
 ## Mental Model
 
 A good way to think about the architecture is:
