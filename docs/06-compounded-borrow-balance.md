@@ -287,7 +287,9 @@ currentStableDebt =
 
 ## Stable-Rate Example
 
-Suppose Alice has:
+Suppose Alice has a stable-rate borrow position.
+
+At the moment Alice's debt was last updated:
 
 ```text
 principalBorrowBalance = 1,000 DAI
@@ -295,7 +297,108 @@ stableBorrowRate = 5%
 lastUpdateTimestamp = one year ago
 ```
 
-After one year, the compounded factor is approximately:
+The function detects that Alice has stable-rate debt because:
+
+```solidity
+_self.stableBorrowRate > 0
+```
+
+It therefore executes:
+
+```solidity
+cumulatedInterest = calculateCompoundedInterest(
+    _self.stableBorrowRate,
+    _self.lastUpdateTimestamp
+);
+```
+
+### Step 1: Calculate the Elapsed Time
+
+The function measures the time between Alice's last debt update and the current block:
+
+```text
+elapsedSeconds =
+    block.timestamp
+    - Alice's lastUpdateTimestamp
+```
+
+In this example:
+
+```text
+elapsedSeconds = one year
+elapsedSeconds = 31,536,000 seconds
+```
+
+### Step 2: Convert the Annual Stable Rate Into a Per-Second Rate
+
+Alice's annual stable rate is:
+
+```text
+5% = 0.05
+```
+
+The protocol converts it into a per-second rate:
+
+```text
+ratePerSecond =
+    stableBorrowRate
+    / SECONDS_PER_YEAR
+```
+
+Conceptually:
+
+```text
+ratePerSecond =
+    0.05
+    / 31,536,000
+```
+
+This produces a very small interest rate for one second.
+
+### Step 3: Compound the Rate for Every Elapsed Second
+
+The compounded-interest factor is:
+
+```text
+compoundedStableInterest =
+    (1 + ratePerSecond) ^ elapsedSeconds
+```
+
+Using the example:
+
+```text
+compoundedStableInterest =
+    (1 + 0.05 / 31,536,000) ^ 31,536,000
+```
+
+The result is approximately:
+
+```text
+1.05127
+```
+
+This is a growth factor, not the interest percentage itself.
+
+```text
+1.05127 = 1.00 + 0.05127
+```
+
+Where:
+
+```text
+1.00 represents Alice's original debt
+0.05127 represents approximately 5.127% accrued interest
+```
+
+### Step 4: Apply the Growth Factor to Alice's Principal
+
+Alice's stored principal is:
+
+```text
+1,000 DAI
+```
+
+The growth factor is:
 
 ```text
 1.05127
@@ -305,12 +408,73 @@ Therefore:
 
 ```text
 currentDebt =
-    1,000 * 1.05127
+    principalBorrowBalance
+    * compoundedStableInterest
+```
 
+```text
+currentDebt =
+    1,000 * 1.05127
+```
+
+```text
 currentDebt ≈ 1,051.27 DAI
 ```
 
-The stable-rate branch does not use the reserve variable borrow index. The position grows using the stable rate stored specifically for the user.
+Alice has therefore accrued approximately:
+
+```text
+1,051.27 - 1,000 = 51.27 DAI
+```
+
+of interest.
+
+### Mapping the Example to the Code
+
+The stable-rate branch calculates:
+
+```solidity
+cumulatedInterest = calculateCompoundedInterest(
+    _self.stableBorrowRate,
+    _self.lastUpdateTimestamp
+);
+```
+
+Using the example:
+
+```text
+cumulatedInterest =
+    calculateCompoundedInterest(
+        5%,
+        one year ago
+    )
+```
+
+```text
+cumulatedInterest ≈ 1.05127
+```
+
+The function then applies this factor to the principal:
+
+```solidity
+compoundedBalance =
+    principalBorrowBalanceRay
+        .rayMul(cumulatedInterest)
+        .rayToWad();
+```
+
+Conceptually:
+
+```text
+compoundedBalance =
+    1,000 * 1.05127
+```
+
+```text
+compoundedBalance ≈ 1,051.27 DAI
+```
+
+
 
 # Variable-Rate Borrow
 
@@ -407,27 +571,317 @@ This ensures that the user pays interest only for the growth that occurred after
 
 ## Variable-Rate Example
 
-Suppose Bob has:
+Suppose Bob has a variable-rate borrow position.
+
+At the moment Bob's debt was last updated:
 
 ```text
 principalBorrowBalance = 1,000 DAI
 user variable borrow index = 1.05
-current reserve variable borrow index = 1.10
+```
+
+The user variable borrow index is Bob's checkpoint. It records the reserve variable borrow index when Bob's debt was last updated.
+
+At the reserve's last update:
+
+```text
+stored reserve variable borrow index = 1.08
+current variable borrow rate = 10% annually
+```
+
+Assume that, since the reserve's last update, the compounded variable interest factor has grown by 2%:
+
+```text
+interest since reserve update = 1.02
+```
+
+The protocol now needs to calculate how much Bob owes at the current block.
+
+### Step 1: Calculate the Interest Since the Reserve's Last Update
+
+The function first calculates the compounded interest accumulated since the reserve was last updated:
+
+```solidity
+calculateCompoundedInterest(
+    _reserve.currentVariableBorrowRate,
+    _reserve.lastUpdateTimestamp
+)
+```
+
+In this example, the result is:
+
+```text
+1.02
+```
+
+This means variable debt in the reserve has grown by another 2% since the stored reserve index was last updated. (1.02 ray is equal to 2%)
+
+Remember that `calculateCompoundedInterest` calculates the compounded interest factor accumulated during this interval:
+
+```text
+_reserve.lastUpdateTimestamp → block.timestamp
+```
+
+### Step 2: Calculate the Current Reserve Variable Borrow Index
+
+The stored reserve variable borrow index is:
+
+```text
+1.08
+```
+
+The new compounded interest factor is:
+
+```text
+1.02
+```
+
+The protocol multiplies them:
+
+```text
+currentReserveVariableIndex =
+    storedReserveVariableIndex
+    * interestSinceReserveUpdate
+```
+
+```text
+currentReserveVariableIndex =
+    1.08 * 1.02
+```
+
+```text
+currentReserveVariableIndex = 1.1016
+```
+
+This value includes both:
+
+```text
+the variable interest accumulated before the reserve's last update
++
+the variable interest accumulated since the reserve's last update
+```
+
+### Step 3: Compare the Reserve Index With Bob's Checkpoint
+
+Bob's user variable borrow index is:
+
+```text
+1.05
+```
+
+The current reserve variable borrow index is:
+
+```text
+1.1016
+```
+
+The protocol calculates Bob's personal growth factor:
+
+```text
+userGrowthFactor =
+    currentReserveVariableIndex
+    / userVariableBorrowIndex
+```
+
+```text
+userGrowthFactor =
+    1.1016 / 1.05
+```
+
+```text
+userGrowthFactor ≈ 1.04914
+```
+
+This means Bob's debt has grown by approximately:
+
+```text
+4.914%
+```
+
+since his last checkpoint.
+
+
+### Why Not Use `1.1016` Directly?
+
+The current reserve variable borrow index is:
+
+```text
+1.1016
+```
+
+However, this value includes all the variable-interest growth accumulated since the reserve index started at:
+
+```text
+1.00
+```
+
+Bob's debt was last updated later, when the reserve index was already:
+
+```text
+1.05
+```
+
+So the timeline is:
+
+```text
+Reserve starts:          1.00
+Bob's checkpoint:        1.05
+Current reserve index:   1.1016
+```
+
+The growth from:
+
+```text
+1.00 -> 1.05
+```
+
+happened before Bob's checkpoint.
+
+Bob must not be charged for that earlier growth. He should only be charged for the growth that occurred after his checkpoint:
+
+```text
+1.05 -> 1.1016
+```
+
+Because indexes are multiplicative growth factors, the protocol uses division to calculate the growth since Bob's checkpoint:
+
+```text
+userGrowthFactor =
+    currentReserveVariableIndex
+    / userVariableBorrowIndex
+```
+
+Using the example:
+
+```text
+userGrowthFactor =
+    1.1016 / 1.05
+```
+
+```text
+userGrowthFactor ≈ 1.04914
+```
+
+Dividing by `1.05` effectively resets Bob's starting point to `1.00`.
+
+The result:
+
+```text
+1.04914
+```
+
+means Bob's debt has grown by approximately:
+
+```text
+4.914%
+```
+
+since his last checkpoint.
+
+The key idea is:
+
+```text
+current reserve index / user checkpoint index
+=
+growth since the user's checkpoint
+```
+
+The protocol cannot use `1.1016` directly because that would charge Bob for interest accumulated before his debt checkpoint.
+
+
+### Step 4: Apply the Growth Factor to Bob's Principal
+
+Bob's stored principal is:
+
+```text
+1,000 DAI
 ```
 
 The growth factor is:
 
 ```text
-1.10 / 1.05 ≈ 1.047619
+1.04914
 ```
 
-Bob's current debt is:
+Therefore:
 
 ```text
-1,000 * 1.047619 ≈ 1,047.62 DAI
+currentDebt =
+    principalBorrowBalance
+    * userGrowthFactor
 ```
 
-Bob is not charged for the reserve index growth from `1.00` to `1.05`, because that growth happened before his checkpoint.
+```text
+currentDebt =
+    1,000 * 1.04914
+```
+
+```text
+currentDebt ≈ 1,049.14 DAI
+```
+
+This is Bob's current compounded borrow balance.
+
+### Mapping the Example to the Code
+
+The variable-rate calculation is:
+
+```solidity
+cumulatedInterest = calculateCompoundedInterest(
+    _reserve.currentVariableBorrowRate,
+    _reserve.lastUpdateTimestamp
+)
+    .rayMul(_reserve.lastVariableBorrowCumulativeIndex)
+    .rayDiv(_self.lastVariableBorrowCumulativeIndex);
+```
+
+Using the values from the example:
+
+```text
+cumulatedInterest =
+    1.02
+    * 1.08
+    / 1.05
+```
+
+```text
+cumulatedInterest =
+    1.1016
+    / 1.05
+```
+
+```text
+cumulatedInterest ≈ 1.04914
+```
+
+The function then applies this factor to the user's principal:
+
+```solidity
+compoundedBalance =
+    principalBorrowBalanceRay
+        .rayMul(cumulatedInterest)
+        .rayToWad();
+```
+
+Using Bob's principal:
+
+```text
+compoundedBalance =
+    1,000
+    * 1.04914
+```
+
+```text
+compoundedBalance ≈ 1,049.14 DAI
+```
+
+The calculation therefore performs three important operations:
+
+```text
+1. Brings the reserve variable borrow index up to the current block.
+2. Preserves all variable interest accumulated before the reserve's last update.
+3. Charges Bob only for the index growth that occurred after his own checkpoint.
+```
 
 # Applying the Interest Factor
 
@@ -494,108 +948,3 @@ This prevents very small borrow positions from becoming interest-free because of
 
 The additional wei is not added when no time has passed.
 
-# Stable and Variable Debt Compared
-
-## Stable Debt
-
-Stable debt uses:
-
-```text
-user stable borrow rate
-user last update timestamp
-```
-
-The growth factor is:
-
-```text
-compounded user stable rate since the user's last update
-```
-
-## Variable Debt
-
-Variable debt uses:
-
-```text
-current reserve variable borrow rate
-reserve last update timestamp
-stored reserve variable borrow index
-user variable borrow checkpoint
-```
-
-The growth factor is:
-
-```text
-current reserve variable index
-/
-user variable borrow index
-```
-
-Both branches ultimately calculate:
-
-```text
-currentDebt =
-    storedPrincipal
-    * growthFactor
-```
-
-# Complete Mental Model
-
-The function can be understood as:
-
-```text
-If the user has no principal:
-    return 0
-
-If the position is stable:
-    calculate compounded interest using
-    the user's stable rate and timestamp
-
-If the position is variable:
-    calculate the current reserve variable index
-    divide it by the user's checkpoint index
-
-Multiply the principal by the resulting growth factor
-
-If interest accrued but rounded to zero:
-    return principal + 1 wei
-
-Otherwise:
-    return the calculated current debt
-```
-
-The central distinction is:
-
-```text
-principalBorrowBalance
-    = debt stored at the last user update
-
-getCompoundedBorrowBalance()
-    = debt owed at the current block
-```
-
-# Summary
-
-`getCompoundedBorrowBalance()` is necessary because Aave uses lazy accounting.
-
-The protocol does not update every borrower's debt continuously. Instead, it stores the principal at the last checkpoint and derives the current debt from interest rates, indexes, and elapsed time.
-
-Compound interest is used because accrued interest becomes part of the outstanding debt and future interest accrues on top of it.
-
-For stable positions:
-
-```text
-currentDebt =
-    principal
-    * compounded user stable interest
-```
-
-For variable positions:
-
-```text
-currentDebt =
-    principal
-    * current reserve variable index
-    / user variable index
-```
-
-This design gives Aave accurate current debt calculations without iterating over every borrower or continuously writing balances to storage.
