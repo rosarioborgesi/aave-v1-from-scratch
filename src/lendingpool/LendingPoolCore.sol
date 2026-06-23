@@ -297,7 +297,7 @@ contract LendingPoolCore {
         reserve.currentVariableBorrowRate = newVariableRate;
 
         reserve.lastUpdateTimestamp = uint40(block.timestamp);
-        
+
         emit ReserveUpdated(
             _reserve,
             newLiquidityRate,

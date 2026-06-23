@@ -9,7 +9,7 @@ interface IReserveInterestRateStrategy {
     /**
      * @dev returns the base variable borrow rate, in rays
      */
-    function getBaseVariableBorrowrate() external view returns (uint256);
+    function getBaseVariableBorrowRate() external view returns (uint256);
 
     /**
      * @dev calculates the liquidity, stable, and variable rates depending on the current utilization rate
