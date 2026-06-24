@@ -2,13 +2,11 @@
 pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
-import {ERC20} from "openzeppelin-contracts/token/ERC20/ERC20.sol";
 import {MockERC20} from "../../mocks/MockERC20.sol";
 import {MockLendingPoolAddressProvider} from "../../mocks/MockLendingPoolAddressProvider.sol";
 import {MockReserveInterestRateStrategy} from "../../mocks/MockReserveInterestRateStrategy.sol";
 
 import {LendingPoolCore} from "src/lendingpool/LendingPoolCore.sol";
-import {LendingPoolAddressesProvider} from "src/configuration/LendingPoolAddressesProvider.sol";
 import {CoreLibrary} from "src/libraries/CoreLibrary.sol";
 import {IReserveInterestRateStrategy} from "src/interfaces/IReserveInterestRateStrategy.sol";
 import {EthAddressLib} from "src/libraries/EthAddressLib.sol";
@@ -30,12 +28,27 @@ contract LendingPoolCoreHarness is LendingPoolCore {
 
     function setReserveBorrows(address _reserve, uint256 _stableBorrows, uint256 _variableBorrows) external {
         s_reserves[_reserve].totalBorrowsStable = _stableBorrows;
-
         s_reserves[_reserve].totalBorrowsVariable = _variableBorrows;
     }
 
     function setUserReserveData(address _user, address _reserve, CoreLibrary.UserReserveData memory _data) external {
         s_usersReserveData[_user][_reserve] = _data;
+    }
+
+    function setReserveRates(
+        address _reserve,
+        uint256 _liquidityRate,
+        uint256 _stableBorrowRate,
+        uint256 _variableBorrowRate
+    ) external {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        reserve.currentLiquidityRate = _liquidityRate;
+        reserve.currentStableBorrowRate = _stableBorrowRate;
+        reserve.currentVariableBorrowRate = _variableBorrowRate;
+    }
+
+    function setReserveLastUpdateTimestamp(address _reserve, uint40 _timestamp) external {
+        s_reserves[_reserve].lastUpdateTimestamp = _timestamp;
     }
 }
 
@@ -51,6 +64,7 @@ contract LendingPoolCoreTest is Test {
 
     LendingPoolCoreHarness public core;
     MockERC20 public token;
+    MockERC20 public secondToken;
     MockReserveInterestRateStrategy public strategy;
     MockLendingPoolAddressProvider public addressProvider;
 
@@ -72,6 +86,7 @@ contract LendingPoolCoreTest is Test {
         core = new LendingPoolCoreHarness(address(addressProvider));
 
         token = new MockERC20("Mock Token", "MOCK");
+        secondToken = new MockERC20("Second Mock Token", "SMOCK");
         strategy = new MockReserveInterestRateStrategy();
 
         token.mint(user, 1_000 ether);
@@ -79,47 +94,19 @@ contract LendingPoolCoreTest is Test {
         vm.deal(user, 100 ether);
     }
 
-    function _initReserve(address _reserve) public {
+    modifier withInitReserve(address _reserve) {
         vm.prank(configurator);
         core.initReserve(_reserve, aToken, 18, address(strategy));
-    }
-
-    ////////////////////////////////
-    //       Access Control       //
-    ////////////////////////////////
-
-    function testInitReserveRevertsWhenCallerIsNotConfigurator() external {
-        vm.prank(attacker);
-
-        vm.expectRevert(LendingPoolCore.LendingPoolCore__OnlyLendingPoolConfigurator.selector);
-
-        core.initReserve(address(token), aToken, 18, address(strategy));
-    }
-
-    function testUpdateStateOnDepositRevertsWhenCallerIsNotLendingPool() external {
-        vm.prank(attacker);
-
-        vm.expectRevert(LendingPoolCore.LendingPoolCore__OnlyLendingPool.selector);
-
-        core.updateStateOnDeposit(address(token), user, DEPOSIT_AMOUNT, true);
-    }
-
-    function testTransferToReserveRevertsWhenCallerIsNotLendingPool() external {
-        vm.prank(attacker);
-
-        vm.expectRevert(LendingPoolCore.LendingPoolCore__OnlyLendingPool.selector);
-
-        core.transferToReserve(address(token), payable(user), DEPOSIT_AMOUNT);
+        _;
     }
 
     ////////////////////////////////
     //        initReserve         //
     ////////////////////////////////
-
     function testInitReserveInitializesConfiguration() external {
         vm.expectEmit(true, false, false, true);
 
-        emit ReserveInitialized(address(token), aToken, address(strategy));
+        emit LendingPoolCore.ReserveInitialized(address(token), aToken, address(strategy));
 
         vm.prank(configurator);
         core.initReserve(address(token), aToken, 18, address(strategy));
@@ -137,11 +124,22 @@ contract LendingPoolCoreTest is Test {
 
         assertTrue(reserve.isActive);
         assertFalse(reserve.isFreezed);
+
+        address[] memory reservesList = core.getReserves();
+
+        assertEq(reservesList.length, 1);
+        assertEq(reservesList[0], address(token));
     }
 
-    function testInitReserveRevertsWhenReserveAlreadyInitialized() external {
-        _initReserve(address(token));
+    function testInitReserveRevertsWhenCallerIsNotConfigurator() external {
+        vm.prank(attacker);
 
+        vm.expectRevert(LendingPoolCore.LendingPoolCore__OnlyLendingPoolConfigurator.selector);
+
+        core.initReserve(address(token), aToken, 18, address(strategy));
+    }
+
+    function testInitReserveRevertsWhenReserveAlreadyInitialized() external withInitReserve(address(token)) {
         vm.prank(configurator);
 
         vm.expectRevert(CoreLibrary.CoreLibrary__ReserveAlreadyInitialized.selector);
@@ -193,27 +191,6 @@ contract LendingPoolCoreTest is Test {
         assertEq(token.balanceOf(address(core)), DEPOSIT_AMOUNT);
     }
 
-    function testTransferToReserveRevertsWhenEthIsSentWithERC20() external {
-        vm.prank(user);
-        token.approve(address(core), DEPOSIT_AMOUNT);
-
-        vm.prank(lendingPool);
-
-        vm.expectRevert(LendingPoolCore.LendingPoolCore__CantSendEthAndTransferErc20.selector);
-
-        core.transferToReserve{value: 1 ether}(address(token), payable(user), DEPOSIT_AMOUNT);
-    }
-
-    function testTransferToReserveRevertsWhenNotEnoughEthIsSent() external {
-        address ethReserve = EthAddressLib.ethAddress();
-
-        vm.prank(lendingPool);
-
-        vm.expectRevert(LendingPoolCore.LendingPoolCore__MsgValueLessThanAmount.selector);
-
-        core.transferToReserve{value: 0.5 ether}(ethReserve, payable(user), 1 ether);
-    }
-
     function testTransferToReserveKeepsExactEthAmount() external {
         address ethReserve = EthAddressLib.ethAddress();
 
@@ -240,13 +217,51 @@ contract LendingPoolCoreTest is Test {
         assertEq(user.balance, userBalanceBefore + 0.2 ether);
     }
 
+    function testTransferToReserveRevertsWhenEthIsSentWithERC20() external {
+        vm.prank(user);
+        token.approve(address(core), DEPOSIT_AMOUNT);
+
+        vm.prank(lendingPool);
+
+        vm.expectRevert(LendingPoolCore.LendingPoolCore__CantSendEthAndTransferErc20.selector);
+
+        core.transferToReserve{value: 1 ether}(address(token), payable(user), DEPOSIT_AMOUNT);
+    }
+
+    function testTransferToReserveRevertsWhenNotEnoughEthIsSent() external {
+        address ethReserve = EthAddressLib.ethAddress();
+
+        vm.prank(lendingPool);
+
+        vm.expectRevert(LendingPoolCore.LendingPoolCore__MsgValueLessThanAmount.selector);
+
+        core.transferToReserve{value: 0.5 ether}(ethReserve, payable(user), 1 ether);
+    }
+
+    function testTransferToReserveRevertsWhenCallerIsNotLendingPool() external {
+        vm.prank(attacker);
+
+        vm.expectRevert(LendingPoolCore.LendingPoolCore__OnlyLendingPool.selector);
+
+        core.transferToReserve(address(token), payable(user), DEPOSIT_AMOUNT);
+    }
+
     ////////////////////////////////
     //    updateStateOnDeposit    //
     ////////////////////////////////
 
-    function testUpdateStateOnDepositStoresNewRatesAndTimestamp() external {
-        _initReserve(address(token));
-
+    // Verifies that updateStateOnDeposit effectively executes
+    // _updateReserveInterestRatesAndTimestamp by checking that:
+    // - the strategy is called with the projected post-deposit liquidity;
+    // - the returned liquidity, stable, and variable rates are stored;
+    // - the reserve timestamp is updated;
+    // - ReserveUpdated is emitted.
+    //
+    // The reserve starts with both cumulative indexes equal to 1 ray and all
+    // current rates equal to zero. Therefore, even though updateCumulativeIndexes()
+    // is called after 30 days, no interest is accrued and both indexes remain 1 ray.
+    // This test does not verify index growth; that behavior is covered separately.
+    function testUpdateStateOnDepositStoresNewRatesAndTimestamp() external withInitReserve(address(token)) {
         uint256 liquidityRate = 5e25; // 5%
         uint256 stableBorrowRate = 8e25; // 8%
         uint256 variableBorrowRate = 10e25; // 10%
@@ -276,6 +291,34 @@ contract LendingPoolCoreTest is Test {
 
         CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
 
+        // Checking that updateCumulativeIndexes() doesn't update lastLiquidityCumulativeIndex and lastVariableBorrowCumulativeIndex
+
+        // Before the deposit, the reserve liquidity rate is 0.
+        //
+        // linearInterest = 1 + rate * elapsedTime / SECONDS_PER_YEAR
+        // linearInterest = 1 + 0 * 30 days / 365 days
+        // linearInterest = 1 ray
+        //
+        // newLiquidityIndex = previousLiquidityIndex * linearInterest
+        // newLiquidityIndex = 1 ray * 1 ray
+        // newLiquidityIndex = 1 ray
+        //
+        assertEq(reserve.lastLiquidityCumulativeIndex, RAY);
+
+        // Before the deposit, the reserve variable borrow rate is 0.
+        //
+        // compoundedInterest = (1 + ratePerSecond) ^ elapsedSeconds
+        // compoundedInterest = (1 + 0) ^ 30 days
+        // compoundedInterest = 1 ray
+        //
+        // newVariableBorrowIndex = previousVariableBorrowIndex * compoundedInterest
+        // newVariableBorrowIndex = 1 ray * 1 ray
+        // newVariableBorrowIndex = 1 ray
+        //
+        assertEq(reserve.lastVariableBorrowCumulativeIndex, RAY);
+
+        // Check that _updateReserveInterestRatesAndTimestamp() updates: currentLiquidityRate, currentStableBorrowRate,
+        // currentVariableBorrowRate and lastUpdateTimestamp
         assertEq(reserve.currentLiquidityRate, liquidityRate);
 
         assertEq(reserve.currentStableBorrowRate, stableBorrowRate);
@@ -285,9 +328,45 @@ contract LendingPoolCoreTest is Test {
         assertEq(reserve.lastUpdateTimestamp, updateTimestamp);
     }
 
-    function testUpdateStateOnFirstDepositEnablesCollateral() external {
-        _initReserve(address(token));
+    // Verifies that updateStateOnDeposit first accumulates interest using the
+    // reserve's previously stored rates, before calculating and storing the new
+    // rates produced by the deposit.
+    function testUpdateStateOnDepositUpdatesCumulativeIndexes() external withInitReserve(address(token)) {
+        uint256 oldLiquidityRate = 5e25; // 5%
+        uint256 oldVariableBorrowRate = 10e25; // 10%
 
+        core.setReserveRates(address(token), oldLiquidityRate, 0, oldVariableBorrowRate);
+
+        core.setReserveBorrows(address(token), 0, 100 ether);
+
+        uint256 previousTimestamp = block.timestamp;
+
+        core.setReserveLastUpdateTimestamp(address(token), uint40(previousTimestamp));
+
+        vm.warp(previousTimestamp + 365 days);
+
+        strategy.setRates(
+            3e25, // new liquidity rate: 3%
+            6e25, // new stable rate: 6%
+            7e25 // new variable rate: 7%
+        );
+
+        vm.prank(lendingPool);
+
+        core.updateStateOnDeposit(address(token), user, DEPOSIT_AMOUNT, false);
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+
+        // The liquidity index grows linearly by 5% over one year:
+        // 1.00 ray * 1.05 = 1.05 ray
+        assertEq(reserve.lastLiquidityCumulativeIndex, 105e25);
+
+        // The variable borrow index must also have increased
+        // using the old 10% variable rate.
+        assertGt(reserve.lastVariableBorrowCumulativeIndex, RAY);
+    }
+
+    function testUpdateStateOnFirstDepositEnablesCollateral() external withInitReserve(address(token)) {
         strategy.setRates(0, 0, 0);
 
         vm.prank(lendingPool);
@@ -299,9 +378,7 @@ contract LendingPoolCoreTest is Test {
         assertTrue(userData.useAsCollateral);
     }
 
-    function testUpdateStateOnLaterDepositDoesNotEnableCollateral() external {
-        _initReserve(address(token));
-
+    function testUpdateStateOnLaterDepositDoesNotEnableCollateral() external withInitReserve(address(token)) {
         strategy.setRates(0, 0, 0);
 
         vm.prank(lendingPool);
@@ -311,6 +388,14 @@ contract LendingPoolCoreTest is Test {
         CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
 
         assertFalse(userData.useAsCollateral);
+    }
+
+    function testUpdateStateOnDepositRevertsWhenCallerIsNotLendingPool() external {
+        vm.prank(attacker);
+
+        vm.expectRevert(LendingPoolCore.LendingPoolCore__OnlyLendingPool.selector);
+
+        core.updateStateOnDeposit(address(token), user, DEPOSIT_AMOUNT, true);
     }
 
     ////////////////////////////////
@@ -325,12 +410,11 @@ contract LendingPoolCoreTest is Test {
         core.removeLastAddedReserve(address(token));
     }
 
-    function testRemoveLastAddedReserveRevertsWhenRequestedReserveIsNotLast() external {
-        MockERC20 secondToken = new MockERC20("Mock Token", "MOCK");
-
-        _initReserve(address(token));
-        _initReserve(address(secondToken));
-
+    function testRemoveLastAddedReserveRevertsWhenRequestedReserveIsNotLast()
+        external
+        withInitReserve(address(token))
+        withInitReserve(address(secondToken))
+    {
         vm.prank(configurator);
 
         vm.expectRevert(LendingPoolCore.LendingPoolCore__ReserveToRemoveIsNotLastReserve.selector);
@@ -338,9 +422,7 @@ contract LendingPoolCoreTest is Test {
         core.removeLastAddedReserve(address(token));
     }
 
-    function testRemoveLastAddedReserveRevertsWhenReserveHasBorrows() external {
-        _initReserve(address(token));
-
+    function testRemoveLastAddedReserveRevertsWhenReserveHasBorrows() external withInitReserve(address(token)) {
         core.setReserveBorrows(address(token), 100 ether, 50 ether);
 
         vm.prank(configurator);
@@ -350,9 +432,7 @@ contract LendingPoolCoreTest is Test {
         core.removeLastAddedReserve(address(token));
     }
 
-    function testRemoveLastAddedReserveResetsConfiguration() external {
-        _initReserve(address(token));
-
+    function testRemoveLastAddedReserveResetsConfiguration() external withInitReserve(address(token)) {
         vm.expectEmit(true, false, false, false);
         emit ReserveRemoved(address(token));
 
@@ -379,9 +459,7 @@ contract LendingPoolCoreTest is Test {
         assertEq(reserve.interestRateStrategyAddress, address(0));
     }
 
-    function testRemovedReserveCanBeInitializedAgain() external {
-        _initReserve(address(token));
-
+    function testRemovedReserveCanBeInitializedAgain() external withInitReserve(address(token)) {
         vm.prank(configurator);
         core.removeLastAddedReserve(address(token));
 
@@ -408,17 +486,13 @@ contract LendingPoolCoreTest is Test {
         assertEq(core.getReserveAvailableLiquidity(EthAddressLib.ethAddress()), 3 ether);
     }
 
-    function testGetReserveTotalBorrowsReturnsStablePlusVariable() external {
-        _initReserve(address(token));
-
+    function testGetReserveTotalBorrowsReturnsStablePlusVariable() external withInitReserve(address(token)) {
         core.setReserveBorrows(address(token), 100 ether, 250 ether);
 
         assertEq(core.getReserveTotalBorrows(address(token)), 350 ether);
     }
 
-    function testGetReserveNormalizedIncomeStartsAtOneRay() external {
-        _initReserve(address(token));
-
+    function testGetReserveNormalizedIncomeStartsAtOneRay() external withInitReserve(address(token)) {
         assertEq(core.getReserveNormalizedIncome(address(token)), RAY);
     }
 }

@@ -555,7 +555,7 @@ contract CoreLibraryTest is Test {
 
         assertEq(compoundedBalance, expectedBalance);
     }
-    
+
     function testGetCompoundedBorrowBalanceUsesReserveVariableIndexWhenStableRateIsZero() external {
         uint256 principalBorrowBalance = 100 ether;
         CoreLibrary.ReserveData memory reserveData = _defaultReserveData();

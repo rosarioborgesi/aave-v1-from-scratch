@@ -171,11 +171,13 @@ contract LendingPoolCore {
         onlyLendingPool
     {
         if (_reserve != EthAddressLib.ethAddress()) {
+            // ERC20 Transfer
             if (msg.value != 0) {
                 revert LendingPoolCore__CantSendEthAndTransferErc20();
             }
             IERC20(_reserve).safeTransferFrom(_user, address(this), _amount);
         } else {
+            // Ether transfer
             if (msg.value < _amount) {
                 revert LendingPoolCore__MsgValueLessThanAmount();
             }
@@ -377,6 +379,14 @@ contract LendingPoolCore {
      */
     function getReserveTotalBorrows(address _reserve) public view returns (uint256) {
         return s_reserves[_reserve].getTotalBorrows();
+    }
+
+    /**
+     * @dev returns the list of initialized reserves
+     * @return the list of reserve addresses
+     */
+    function getReserves() external view returns (address[] memory) {
+        return s_reservesList;
     }
 
     /**
