@@ -8,6 +8,7 @@ import {MockReserveInterestRateStrategy} from "../../mocks/MockReserveInterestRa
 
 import {LendingPoolCore} from "src/lendingpool/LendingPoolCore.sol";
 import {CoreLibrary} from "src/libraries/CoreLibrary.sol";
+import {WadRayMath} from "src/libraries/WadRayMath.sol";
 import {IReserveInterestRateStrategy} from "src/interfaces/IReserveInterestRateStrategy.sol";
 import {EthAddressLib} from "src/libraries/EthAddressLib.sol";
 
@@ -53,6 +54,8 @@ contract LendingPoolCoreHarness is LendingPoolCore {
 }
 
 contract LendingPoolCoreTest is Test {
+    using WadRayMath for uint256;
+
     uint256 public constant RAY = 1e27;
     uint256 public constant DEPOSIT_AMOUNT = 100 ether;
 
@@ -250,17 +253,8 @@ contract LendingPoolCoreTest is Test {
     //    updateStateOnDeposit    //
     ////////////////////////////////
 
-    // Verifies that updateStateOnDeposit effectively executes
-    // _updateReserveInterestRatesAndTimestamp by checking that:
-    // - the strategy is called with the projected post-deposit liquidity;
-    // - the returned liquidity, stable, and variable rates are stored;
-    // - the reserve timestamp is updated;
-    // - ReserveUpdated is emitted.
-    //
-    // The reserve starts with both cumulative indexes equal to 1 ray and all
-    // current rates equal to zero. Therefore, even though updateCumulativeIndexes()
-    // is called after 30 days, no interest is accrued and both indexes remain 1 ray.
-    // This test does not verify index growth; that behavior is covered separately.
+    // Verifies that a deposit keeps the cumulative indexes unchanged when the 
+    // previous rates are zero, then stores the new rates and current timestamp.
     function testUpdateStateOnDepositStoresNewRatesAndTimestamp() external withInitReserve(address(token)) {
         uint256 liquidityRate = 5e25; // 5%
         uint256 stableBorrowRate = 8e25; // 8%
@@ -272,21 +266,11 @@ contract LendingPoolCoreTest is Test {
 
         vm.warp(updateTimestamp);
 
-        // No tokens have been transferred yet, so current available
-        // liquidity is zero. The deposit adds 100 tokens.
-        vm.expectCall(
-            address(strategy),
-            abi.encodeCall(
-                IReserveInterestRateStrategy.calculateInterestRates, (address(token), DEPOSIT_AMOUNT, 0, 0, 0)
-            )
-        );
-
         vm.expectEmit(true, false, false, true);
 
         emit ReserveUpdated(address(token), liquidityRate, stableBorrowRate, variableBorrowRate, RAY, RAY);
-
+        
         vm.prank(lendingPool);
-
         core.updateStateOnDeposit(address(token), user, DEPOSIT_AMOUNT, false);
 
         CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
@@ -328,28 +312,31 @@ contract LendingPoolCoreTest is Test {
         assertEq(reserve.lastUpdateTimestamp, updateTimestamp);
     }
 
-    // Verifies that updateStateOnDeposit first accumulates interest using the
-    // reserve's previously stored rates, before calculating and storing the new
-    // rates produced by the deposit.
-    function testUpdateStateOnDepositUpdatesCumulativeIndexes() external withInitReserve(address(token)) {
+    // Verifies that a deposit updates the cumulative indexes using the old rates,
+    // then stores the new rates and the current timestamp.
+    function testUpdateStateOnDepositUpdatesIndexesRatesAndTimestamp() external withInitReserve(address(token)) {
         uint256 oldLiquidityRate = 5e25; // 5%
         uint256 oldVariableBorrowRate = 10e25; // 10%
 
         core.setReserveRates(address(token), oldLiquidityRate, 0, oldVariableBorrowRate);
 
+        // Variable borrows must be greater than zero for the variable
+        // borrow index to be updated.
         core.setReserveBorrows(address(token), 0, 100 ether);
 
         uint256 previousTimestamp = block.timestamp;
 
         core.setReserveLastUpdateTimestamp(address(token), uint40(previousTimestamp));
 
-        vm.warp(previousTimestamp + 365 days);
+        uint256 updateTimestamp = previousTimestamp + 365 days;
 
-        strategy.setRates(
-            3e25, // new liquidity rate: 3%
-            6e25, // new stable rate: 6%
-            7e25 // new variable rate: 7%
-        );
+        vm.warp(updateTimestamp);
+
+        uint256 newLiquidityRate = 3e25; // 3%
+        uint256 newStableBorrowRate = 6e25; // 6%
+        uint256 newVariableBorrowRate = 7e25; // 7%
+
+        strategy.setRates(newLiquidityRate, newStableBorrowRate, newVariableBorrowRate);
 
         vm.prank(lendingPool);
 
@@ -357,13 +344,49 @@ contract LendingPoolCoreTest is Test {
 
         CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
 
-        // The liquidity index grows linearly by 5% over one year:
-        // 1.00 ray * 1.05 = 1.05 ray
+        // The liquidity index is updated using linear interest and the old
+        // liquidity rate that applied during the elapsed year.
+        //
+        // linearInterest = 1 ray + oldLiquidityRate * elapsedTime / SECONDS_PER_YEAR
+        // linearInterest = 1.00 + 5% * 365 days / 365 days
+        // linearInterest = 1.05 ray
+        //
+        // newLiquidityIndex = previousLiquidityIndex * linearInterest
+        // newLiquidityIndex = 1.00 ray * 1.05 ray
+        // newLiquidityIndex = 1.05 ray = 105e25
         assertEq(reserve.lastLiquidityCumulativeIndex, 105e25);
 
-        // The variable borrow index must also have increased
-        // using the old 10% variable rate.
-        assertGt(reserve.lastVariableBorrowCumulativeIndex, RAY);
+        // The variable borrow index is updated using compounded interest
+        // and the old variable borrow rate that applied during the year.
+        //
+        // ratePerSecond = oldVariableBorrowRate / SECONDS_PER_YEAR
+        //
+        // compoundedInterest = (1 ray + ratePerSecond) ^ elapsedSeconds
+        // compoundedInterest = (1 + 10% / 31,536,000) ^ 31,536,000
+        // compoundedInterest ≈ 1.10517 ray
+        //
+        // newVariableBorrowIndex = previousVariableBorrowIndex * compoundedInterest
+        // newVariableBorrowIndex = 1.00 ray * 1.10517 ray
+        // newVariableBorrowIndex ≈ 1.10517 ray
+        uint256 ratePerSecond = oldVariableBorrowRate / 365 days;
+
+        uint256 expectedCompoundedInterest = (RAY + ratePerSecond).rayPow(365 days);
+
+        uint256 expectedVariableBorrowIndex = RAY.rayMul(expectedCompoundedInterest);
+
+        assertEq(reserve.lastVariableBorrowCumulativeIndex, expectedVariableBorrowIndex);
+
+        // After the indexes are updated using the old rates, the rates
+        // returned by the strategy are stored for the next interest period.
+        assertEq(reserve.currentLiquidityRate, newLiquidityRate);
+
+        assertEq(reserve.currentStableBorrowRate, newStableBorrowRate);
+
+        assertEq(reserve.currentVariableBorrowRate, newVariableBorrowRate);
+
+        // The current block timestamp becomes the starting checkpoint
+        // for the next reserve interest calculation.
+        assertEq(reserve.lastUpdateTimestamp, updateTimestamp);
     }
 
     function testUpdateStateOnFirstDepositEnablesCollateral() external withInitReserve(address(token)) {
@@ -401,6 +424,26 @@ contract LendingPoolCoreTest is Test {
     ////////////////////////////////
     //   removeLastAddedReserve   //
     ////////////////////////////////
+
+    function testRemoveLastAddedReserveRemovesLastReserveFromList()
+        external
+        withInitReserve(address(token))
+        withInitReserve(address(secondToken))
+    {
+        address[] memory reservesListBefore = core.getReserves();
+
+        assertEq(reservesListBefore.length, 2);
+        assertEq(reservesListBefore[0], address(token));
+        assertEq(reservesListBefore[1], address(secondToken));
+
+        vm.prank(configurator);
+        core.removeLastAddedReserve(address(secondToken));
+
+        address[] memory reservesListAfter = core.getReserves();
+
+        assertEq(reservesListAfter.length, 1);
+        assertEq(reservesListAfter[0], address(token));
+    }
 
     function testRemoveLastAddedReserveRevertsWhenListIsEmpty() external {
         vm.prank(configurator);
@@ -458,7 +501,7 @@ contract LendingPoolCoreTest is Test {
 
         assertEq(reserve.interestRateStrategyAddress, address(0));
     }
-
+    
     function testRemovedReserveCanBeInitializedAgain() external withInitReserve(address(token)) {
         vm.prank(configurator);
         core.removeLastAddedReserve(address(token));
