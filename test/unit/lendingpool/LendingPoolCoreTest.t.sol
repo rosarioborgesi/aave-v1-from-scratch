@@ -51,6 +51,18 @@ contract LendingPoolCoreHarness is LendingPoolCore {
     function setReserveLastUpdateTimestamp(address _reserve, uint40 _timestamp) external {
         s_reserves[_reserve].lastUpdateTimestamp = _timestamp;
     }
+
+    function exposedUpdateReserveInterestRatesAndTimestamp(
+        address _reserve,
+        uint256 _liquidityAdded,
+        uint256 _liquidityTaken
+    ) external {
+        _updateReserveInterestRatesAndTimestamp(_reserve, _liquidityAdded, _liquidityTaken);
+    }
+
+    function exposedAddReserveToList(address _reserve) external {
+        _addReserveToList(_reserve);
+    }
 }
 
 contract LendingPoolCoreTest is Test {
@@ -103,6 +115,13 @@ contract LendingPoolCoreTest is Test {
         _;
     }
 
+    function _initReserveWithMockAToken(address _reserve) internal returns (MockERC20 mockAToken) {
+        mockAToken = new MockERC20("Mock AToken", "aMOCK");
+
+        vm.prank(configurator);
+        core.initReserve(_reserve, address(mockAToken), 18, address(strategy));
+    }
+
     ////////////////////////////////
     //        initReserve         //
     ////////////////////////////////
@@ -151,31 +170,25 @@ contract LendingPoolCoreTest is Test {
     }
 
     ////////////////////////////////
-    //  setUserUseAsCollateral   //
+    //      _addReserveToList     //
     ////////////////////////////////
+    function testAddReserveToListAddsReserveToList() external {
+        core.exposedAddReserveToList(address(token));
 
-    function testSetUserUseReserveAsCollateralEnablesCollateral() external {
-        vm.prank(lendingPool);
+        address[] memory reservesList = core.getReserves();
 
-        core.setUserUseReserveAsCollateral(address(token), user, true);
-
-        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
-
-        assertTrue(userData.useAsCollateral);
+        assertEq(reservesList.length, 1);
+        assertEq(reservesList[0], address(token));
     }
 
-    function testSetUserUseReserveAsCollateralDisablesCollateral() external {
-        vm.startPrank(lendingPool);
+    function testAddReserveToListDoesNotAddDuplicateReserve() external {
+        core.exposedAddReserveToList(address(token));
+        core.exposedAddReserveToList(address(token));
 
-        core.setUserUseReserveAsCollateral(address(token), user, true);
+        address[] memory reservesList = core.getReserves();
 
-        core.setUserUseReserveAsCollateral(address(token), user, false);
-
-        vm.stopPrank();
-
-        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
-
-        assertFalse(userData.useAsCollateral);
+        assertEq(reservesList.length, 1);
+        assertEq(reservesList[0], address(token));
     }
 
     ////////////////////////////////
@@ -253,7 +266,7 @@ contract LendingPoolCoreTest is Test {
     //    updateStateOnDeposit    //
     ////////////////////////////////
 
-    // Verifies that a deposit keeps the cumulative indexes unchanged when the 
+    // Verifies that a deposit keeps the cumulative indexes unchanged when the
     // previous rates are zero, then stores the new rates and current timestamp.
     function testUpdateStateOnDepositStoresNewRatesAndTimestamp() external withInitReserve(address(token)) {
         uint256 liquidityRate = 5e25; // 5%
@@ -266,10 +279,17 @@ contract LendingPoolCoreTest is Test {
 
         vm.warp(updateTimestamp);
 
+        vm.expectCall(
+            address(strategy),
+            abi.encodeCall(
+                IReserveInterestRateStrategy.calculateInterestRates, (address(token), DEPOSIT_AMOUNT, 0, 0, 0)
+            )
+        );
+
         vm.expectEmit(true, false, false, true);
 
         emit ReserveUpdated(address(token), liquidityRate, stableBorrowRate, variableBorrowRate, RAY, RAY);
-        
+
         vm.prank(lendingPool);
         core.updateStateOnDeposit(address(token), user, DEPOSIT_AMOUNT, false);
 
@@ -421,6 +441,51 @@ contract LendingPoolCoreTest is Test {
         core.updateStateOnDeposit(address(token), user, DEPOSIT_AMOUNT, true);
     }
 
+    ////////////////////////////////////////////////
+    //  _updateReserveInterestRatesAndTimestamp   //
+    ////////////////////////////////////////////////
+    function testUpdateReserveInterestRatesAndTimestampUpdatesRatesTimestampAndEmitsEvent()
+        external
+        withInitReserve(address(token))
+    {
+        uint256 availableLiquidity = 10 ether;
+        uint256 liquidityAdded = 5 ether;
+        uint256 liquidityTaken = 2 ether;
+
+        token.mint(address(core), availableLiquidity);
+
+        uint256 liquidityRate = 4e25; // 4%
+        uint256 stableBorrowRate = 7e25; // 7%
+        uint256 variableBorrowRate = 9e25; // 9%
+
+        strategy.setRates(liquidityRate, stableBorrowRate, variableBorrowRate);
+
+        uint256 updateTimestamp = block.timestamp + 1 days;
+
+        vm.warp(updateTimestamp);
+
+        vm.expectCall(
+            address(strategy),
+            abi.encodeCall(
+                IReserveInterestRateStrategy.calculateInterestRates,
+                (address(token), availableLiquidity + liquidityAdded - liquidityTaken, 0, 0, 0)
+            )
+        );
+
+        vm.expectEmit(true, false, false, true);
+
+        emit ReserveUpdated(address(token), liquidityRate, stableBorrowRate, variableBorrowRate, RAY, RAY);
+
+        core.exposedUpdateReserveInterestRatesAndTimestamp(address(token), liquidityAdded, liquidityTaken);
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+
+        assertEq(reserve.currentLiquidityRate, liquidityRate);
+        assertEq(reserve.currentStableBorrowRate, stableBorrowRate);
+        assertEq(reserve.currentVariableBorrowRate, variableBorrowRate);
+        assertEq(reserve.lastUpdateTimestamp, updateTimestamp);
+    }
+
     ////////////////////////////////
     //   removeLastAddedReserve   //
     ////////////////////////////////
@@ -501,7 +566,7 @@ contract LendingPoolCoreTest is Test {
 
         assertEq(reserve.interestRateStrategyAddress, address(0));
     }
-    
+
     function testRemovedReserveCanBeInitializedAgain() external withInitReserve(address(token)) {
         vm.prank(configurator);
         core.removeLastAddedReserve(address(token));
@@ -513,10 +578,37 @@ contract LendingPoolCoreTest is Test {
         assertEq(core.getReserveATokenAddress(address(token)), aToken);
     }
 
-    ////////////////////////////////
-    //          Getters           //
-    ////////////////////////////////
+    //////////////////////////////////////
+    //  setUserUseReserveAsCollateral   //
+    //////////////////////////////////////
 
+    function testSetUserUseReserveAsCollateralEnablesCollateral() external {
+        vm.prank(lendingPool);
+
+        core.setUserUseReserveAsCollateral(address(token), user, true);
+
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        assertTrue(userData.useAsCollateral);
+    }
+
+    function testSetUserUseReserveAsCollateralDisablesCollateral() external {
+        vm.startPrank(lendingPool);
+
+        core.setUserUseReserveAsCollateral(address(token), user, true);
+
+        core.setUserUseReserveAsCollateral(address(token), user, false);
+
+        vm.stopPrank();
+
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        assertFalse(userData.useAsCollateral);
+    }
+
+    /////////////////////////////////////
+    //  getReserveAvailableLiquidity   //
+    /////////////////////////////////////
     function testGetReserveAvailableLiquidityReturnsERC20Balance() external {
         token.mint(address(core), 250 ether);
 
@@ -529,12 +621,85 @@ contract LendingPoolCoreTest is Test {
         assertEq(core.getReserveAvailableLiquidity(EthAddressLib.ethAddress()), 3 ether);
     }
 
+    ////////////////////////////////
+    //    getReserveTotalBorrows  //
+    ////////////////////////////////
     function testGetReserveTotalBorrowsReturnsStablePlusVariable() external withInitReserve(address(token)) {
         core.setReserveBorrows(address(token), 100 ether, 250 ether);
 
         assertEq(core.getReserveTotalBorrows(address(token)), 350 ether);
     }
 
+    ////////////////////////////////
+    //  getReserveATokenAddress   //
+    ////////////////////////////////
+    function testGetReserveATokenAddressReturnsConfiguredAToken() external withInitReserve(address(token)) {
+        assertEq(core.getReserveATokenAddress(address(token)), aToken);
+    }
+
+    ////////////////////////////////
+    //         getReserves        //
+    ////////////////////////////////
+    function testGetReservesReturnsInitializedReservesInOrder()
+        external
+        withInitReserve(address(token))
+        withInitReserve(address(secondToken))
+    {
+        address[] memory reservesList = core.getReserves();
+
+        assertEq(reservesList.length, 2);
+        assertEq(reservesList[0], address(token));
+        assertEq(reservesList[1], address(secondToken));
+    }
+
+    ////////////////////////////////
+    //  getUserBasicReserveData   //
+    ////////////////////////////////
+    function testGetUserBasicReserveDataReturnsDepositDataWhenUserHasNoBorrow() external {
+        MockERC20 mockAToken = _initReserveWithMockAToken(address(token));
+        mockAToken.mint(user, 42 ether);
+
+        vm.prank(lendingPool);
+        core.setUserUseReserveAsCollateral(address(token), user, true);
+
+        (uint256 underlyingBalance, uint256 compoundedBorrowBalance, uint256 originationFee, bool useAsCollateral) =
+            core.getUserBasicReserveData(address(token), user);
+
+        assertEq(underlyingBalance, 42 ether);
+        assertEq(compoundedBorrowBalance, 0);
+        assertEq(originationFee, 0);
+        assertTrue(useAsCollateral);
+    }
+
+    function testGetUserBasicReserveDataReturnsBorrowDataWhenUserHasBorrow() external {
+        MockERC20 mockAToken = _initReserveWithMockAToken(address(token));
+        mockAToken.mint(user, 75 ether);
+
+        core.setReserveLastUpdateTimestamp(address(token), uint40(block.timestamp));
+
+        CoreLibrary.UserReserveData memory userData = CoreLibrary.UserReserveData({
+            principalBorrowBalance: 50 ether,
+            lastVariableBorrowCumulativeIndex: RAY,
+            originationFee: 1 ether,
+            stableBorrowRate: 0,
+            lastUpdateTimestamp: uint40(block.timestamp),
+            useAsCollateral: true
+        });
+
+        core.setUserReserveData(user, address(token), userData);
+
+        (uint256 underlyingBalance, uint256 compoundedBorrowBalance, uint256 originationFee, bool useAsCollateral) =
+            core.getUserBasicReserveData(address(token), user);
+
+        assertEq(underlyingBalance, 75 ether);
+        assertEq(compoundedBorrowBalance, 50 ether);
+        assertEq(originationFee, 1 ether);
+        assertTrue(useAsCollateral);
+    }
+
+    ////////////////////////////////
+    //  getReserveNormalizedIncome //
+    ////////////////////////////////
     function testGetReserveNormalizedIncomeStartsAtOneRay() external withInitReserve(address(token)) {
         assertEq(core.getReserveNormalizedIncome(address(token)), RAY);
     }
