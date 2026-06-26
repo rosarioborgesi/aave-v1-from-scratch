@@ -1264,9 +1264,21 @@ linearInterest = 1.025e27
 
 So after half a year at a 5% annual rate, the reserve grows by 2.5%.
 
-# getNormalizedIncome
+# `getNormalizedIncome`
 
-`getNormalizedIncome` calculates the current normalized income of a reserve.
+`getNormalizedIncome` calculates the reserve's current normalized income.
+
+The normalized income is the reserve's current supplier growth factor. It represents how much one unit deposited when the reserve index was initialized at `1 ray` has grown.
+
+It is expressed in ray precision:
+
+```text
+1.00 ray = no cumulative supplier growth
+1.05 ray = 5% cumulative supplier growth
+1.20 ray = 20% cumulative supplier growth
+```
+
+The function does not modify the reserve state. It calculates the current value using the liquidity index stored during the last reserve update and the interest accrued since that update.
 
 ```solidity
 function getNormalizedIncome(
@@ -1282,14 +1294,25 @@ lastUpdateTimestamp
 lastLiquidityCumulativeIndex
 ```
 
-to calculate the current reserve income.
-
-## Formula
-
-The idea is:
+The stored liquidity index represents the supplier growth already recorded during the previous reserve update:
 
 ```text
-normalizedIncome = linearInterest * lastLiquidityCumulativeIndex
+lastLiquidityCumulativeIndex
+    = supplier growth stored at the last update
+```
+
+The function then calculates the additional linear interest accumulated between `lastUpdateTimestamp` and the current block:
+
+```text
+linearInterest = 1 + currentLiquidityRate × elapsedTime / SECONDS_PER_YEAR
+```
+
+Finally, it applies that growth to the stored liquidity index:
+
+```text
+normalizedIncome =
+    lastLiquidityCumulativeIndex
+    × linearInterest
 ```
 
 In Solidity:
@@ -1298,15 +1321,17 @@ In Solidity:
 uint256 cumulated = calculateLinearInterest(
     _reserve.currentLiquidityRate,
     _reserve.lastUpdateTimestamp
-).rayMul(_reserve.lastLiquidityCumulativeIndex);
+).rayMul(
+    _reserve.lastLiquidityCumulativeIndex
+);
 ```
 
-This means:
+The calculation therefore performs three steps:
 
 ```text
-1. Calculate how much interest accrued since the last update
-2. Multiply that by the previous liquidity cumulative index
-3. Return the current normalized income
+1. Calculate the linear interest accrued since the last reserve update.
+2. Multiply it by the previously stored liquidity index.
+3. Return the current normalized income.
 ```
 
 ## Example: Initial Index, One Year at 5%

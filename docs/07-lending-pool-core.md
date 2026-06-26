@@ -663,6 +663,8 @@ function getReserveNormalizedIncome(
 
 Returns the reserve's current supplier growth factor.
 
+It tells: “How much has one deposited unit grown since the reserve started?”
+
 It combines:
 
 ```text
