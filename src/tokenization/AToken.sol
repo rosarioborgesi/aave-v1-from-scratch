@@ -95,16 +95,14 @@ contract AToken is ERC20 {
             revert AToken__ZeroAddress();
         }
         i_underlyingAssetDecimals = _underlyingAssetDecimals;
+        i_addressesProvider = LendingPoolAddressesProvider(_addressesProvider);
 
         address coreAddress = i_addressesProvider.getLendingPoolCore();
-
         address poolAddress = i_addressesProvider.getLendingPool();
-
         if (coreAddress == address(0) || poolAddress == address(0)) {
             revert AToken__ZeroAddress();
         }
 
-        i_addressesProvider = LendingPoolAddressesProvider(_addressesProvider);
         i_core = LendingPoolCore(coreAddress);
         i_pool = LendingPool(poolAddress);
 
