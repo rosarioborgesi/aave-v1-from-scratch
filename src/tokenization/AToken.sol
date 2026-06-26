@@ -48,7 +48,7 @@ contract AToken is ERC20 {
     uint8 private immutable i_underlyingAssetDecimals;
 
     // the last reserve normalized income already applied to that user
-    mapping(address user => uint256 lastNormalizedIncome) private s_userIndexes;
+    mapping(address user => uint256 lastNormalizedIncome) internal s_userIndexes;
     // TODO need to check interestRedirectionAddresses
     mapping(address => address) private s_interestRedirectionAddresses;
     // TODO need to check redirectedBalances
