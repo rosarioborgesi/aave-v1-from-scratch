@@ -65,12 +65,20 @@ contract WadRayMathTest is Test {
         math = new WadRayMathHarness();
     }
 
+    ///////////////////////////////////////
+    //             constants             //
+    ///////////////////////////////////////
+
     function testConstants() public view {
         assertEq(math.wad(), WAD);
         assertEq(math.ray(), RAY);
         assertEq(math.halfWad(), HALF_WAD);
         assertEq(math.halfRay(), HALF_RAY);
     }
+
+    ///////////////////////////////////////
+    //              wadMul               //
+    ///////////////////////////////////////
 
     function testWadMul() public view {
         // 2 * 3 = 6
@@ -98,6 +106,10 @@ contract WadRayMathTest is Test {
         assertEq(math.wadMul(1, HALF_WAD), 1);
     }
 
+    ///////////////////////////////////////
+    //              wadDiv               //
+    ///////////////////////////////////////
+
     function testWadDiv() public view {
         // 3 / 2 = 1.5
         // (3e18 * 1e18 + 1e18) / 2e18 = 1.5e18
@@ -109,6 +121,10 @@ contract WadRayMathTest is Test {
         vm.expectRevert(WadRayMath.WadRayMath__DivisionByZero.selector);
         math.wadDiv(WAD, 0);
     }
+
+    ///////////////////////////////////////
+    //              rayMul               //
+    ///////////////////////////////////////
 
     function testRayMul() public view {
         // 2 * 3 = 6
@@ -132,6 +148,10 @@ contract WadRayMathTest is Test {
         assertEq(math.rayMul(1, HALF_RAY), 1);
     }
 
+    ///////////////////////////////////////
+    //              rayDiv               //
+    ///////////////////////////////////////
+
     function testRayDiv() public view {
         // 3 / 2 = 1.5
         // (3e27 * 1e27 + 1e27) / 2e27 = 1.5e27
@@ -144,6 +164,10 @@ contract WadRayMathTest is Test {
         math.rayDiv(RAY, 0);
     }
 
+    ///////////////////////////////////////
+    //             wadToRay              //
+    ///////////////////////////////////////
+
     function testWadToRay() public view {
         // 1 wad = 1 ray
         // 1e18 * 1e9 = 1e27
@@ -154,6 +178,10 @@ contract WadRayMathTest is Test {
         assertEq(math.wadToRay(5e18), 5e27);
     }
 
+    ///////////////////////////////////////
+    //             rayToWad              //
+    ///////////////////////////////////////
+
     function testRayToWad() public view {
         // 1 ray = 1 wad
         // (1e27 + 0.5e9) / 1e9 = 1e18
@@ -163,6 +191,10 @@ contract WadRayMathTest is Test {
         // (5e27 + 0.5e9) / 1e9 = 5e18
         assertEq(math.rayToWad(5e27), 5e18);
     }
+
+    ///////////////////////////////////////
+    //              rayPow               //
+    ///////////////////////////////////////
 
     function testRayPowWithZeroExponentReturnsRay() public view {
         // 5^0 = 1
