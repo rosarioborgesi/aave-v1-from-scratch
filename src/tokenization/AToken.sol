@@ -278,7 +278,7 @@ contract AToken is ERC20 {
      * @return the current total supply
      *
      */
-    function totalSupply() public view returns (uint256) {
+    function totalSupply() public view override returns (uint256) {
         uint256 currentSupplyPrincipal = super.totalSupply();
         if (currentSupplyPrincipal == 0) {
             return 0;
