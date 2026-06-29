@@ -50,9 +50,9 @@ contract AToken is ERC20 {
     // the last reserve normalized income already applied to that user
     mapping(address user => uint256 lastNormalizedIncome) internal s_userIndexes;
     // TODO need to check interestRedirectionAddresses
-    mapping(address => address) private s_interestRedirectionAddresses;
+    mapping(address => address) internal s_interestRedirectionAddresses;
     // TODO need to check redirectedBalances
-    mapping(address => uint256) private s_redirectedBalances;
+    mapping(address => uint256) internal s_redirectedBalances;
 
     LendingPoolAddressesProvider private immutable i_addressesProvider;
     LendingPoolCore private immutable i_core;
