@@ -821,7 +821,19 @@ function _cumulateBalance(
     )
 ```
 
-This function converts accrued interest into stored ERC20 principal.
+`_cumulateBalance` converts the interest already included in the user's dynamic `balanceOf()` into stored ERC20 principal.
+
+Before this function is called, the user's balance may be divided into:
+
+```text
+stored principal
++
+virtual accrued interest
+```
+
+After the function runs, the accrued interest is minted and becomes part of the stored principal.
+
+The user's economic balance does not increase during this operation. The function only materializes interest that had already accrued.
 
 It returns:
 
@@ -832,16 +844,60 @@ balance increase
 new user index
 ```
 
-## 1. Read the Stored Principal
+### 1. Read the Stored Principal
 
 ```solidity
 uint256 previousPrincipalBalance =
     super.balanceOf(_user);
 ```
 
-This is the balance already stored in ERC20 state.
+`super.balanceOf()` reads the balance stored directly in the inherited ERC20 contract.
 
-## 2. Calculate the Balance Increase
+It does not include interest accrued since the user's last index update.
+
+Example:
+
+```text
+stored principal = 100 aDAI
+```
+
+### 2. Calculate the Current Balance
+
+The function calls the overridden `balanceOf()`:
+
+```solidity
+balanceOf(_user)
+```
+
+This returns the user's current interest-bearing balance by applying the reserve normalized income to the user's balance.
+
+For a user without interest redirection:
+
+```text
+current balance =
+    principal balance
+    × current normalized income
+    ÷ user index
+```
+
+Assume:
+
+```text
+previous principal balance = 100 aDAI
+user index = 1.00 ray
+current normalized income = 1.05 ray
+```
+
+Then:
+
+```text
+current balance =
+    100 × 1.05 / 1.00
+
+current balance = 105 aDAI
+```
+
+### 3. Calculate the Balance Increase
 
 ```solidity
 uint256 balanceIncrease =
@@ -849,32 +905,61 @@ uint256 balanceIncrease =
         - previousPrincipalBalance;
 ```
 
-Example:
+The balance increase is the interest accrued since the user's previous index checkpoint.
+
+Using the previous example:
 
 ```text
-stored principal = 100
-current balance = 105
+current balance = 105 aDAI
+previous principal balance = 100 aDAI
 
-balance increase = 5
+balance increase =
+    105 - 100
+
+balance increase = 5 aDAI
 ```
 
-## 3. Mint the Accrued Interest
+The `5 aDAI` already belongs to the user economically, but it has not yet been minted into ERC20 storage.
+
+### 4. Mint the Accrued Interest
 
 ```solidity
 _mint(_user, balanceIncrease);
 ```
 
-The accrued interest becomes stored principal.
+The function mints the accrued interest and adds it to the stored principal.
+
+Before minting:
+
+```text
+stored principal = 100 aDAI
+dynamic balance = 105 aDAI
+```
 
 After minting:
 
 ```text
-old stored principal = 100
-balance increase = 5
-new stored principal = 105
+stored principal = 105 aDAI
+dynamic balance = 105 aDAI
 ```
 
-## 4. Update the User Index
+The user's current balance remains unchanged.
+
+Only its representation changes:
+
+```text
+before:
+    100 stored principal
+    + 5 virtual interest
+
+after:
+    105 stored principal
+    + 0 unapplied interest
+```
+
+Minting also increases the stored ERC20 supply by the same `balanceIncrease`.
+
+### 5. Update the User Index
 
 ```solidity
 uint256 index =
@@ -884,9 +969,129 @@ uint256 index =
         );
 ```
 
-The user's checkpoint is moved to the current reserve normalized income.
+After materializing the interest, the user's index is moved to the current reserve normalized income.
 
-Future interest is calculated only from this new index onward.
+Using the example:
+
+```text
+old user index = 1.00 ray
+current normalized income = 1.05 ray
+new user index = 1.05 ray
+```
+
+This records that all reserve growth up to `1.05 ray` has already been applied to the user.
+
+Future interest is calculated only from this new checkpoint onward.
+
+Immediately after the update:
+
+```text
+current balance =
+    105 × 1.05 / 1.05
+
+current balance = 105 aDAI
+```
+
+The division by the new user index prevents the previously accrued `5 aDAI` from being counted again.
+
+### 6. Return the Updated Values
+
+```solidity
+return (
+    previousPrincipalBalance,
+    previousPrincipalBalance
+        + balanceIncrease,
+    balanceIncrease,
+    index
+);
+```
+
+Using the complete example, the returned values are:
+
+```text
+previousPrincipalBalance = 100 aDAI
+newPrincipalBalance = 105 aDAI
+balanceIncrease = 5 aDAI
+index = 1.05 ray
+```
+
+## Complete Example
+
+Assume Alice has:
+
+```text
+stored principal = 100 aDAI
+user index = 1.00 ray
+current normalized income = 1.05 ray
+```
+
+The function first calculates:
+
+```text
+current balance =
+    100 × 1.05 / 1.00
+
+current balance = 105 aDAI
+```
+
+Then:
+
+```text
+balance increase =
+    105 - 100
+
+balance increase = 5 aDAI
+```
+
+It mints the accrued interest:
+
+```text
+new stored principal =
+    100 + 5
+
+new stored principal = 105 aDAI
+```
+
+Finally, it updates the user index:
+
+```text
+new user index = 1.05 ray
+```
+
+The final state is:
+
+```text
+stored principal = 105 aDAI
+current balance = 105 aDAI
+user index = 1.05 ray
+```
+
+The user's value was already `105 aDAI` before the function ran. `_cumulateBalance()` only converted the virtual `5 aDAI` of accrued interest into stored principal.
+
+## First Interaction
+
+For a user with no balance:
+
+```text
+stored principal = 0
+redirected balance = 0
+user index = 0
+```
+
+`balanceOf()` returns zero before attempting to divide by the user index.
+
+Therefore:
+
+```text
+previous principal balance = 0
+current balance = 0
+balance increase = 0
+```
+
+The function mints zero interest and sets the user's index to the current reserve normalized income.
+
+This establishes the user's starting checkpoint before a new deposit is minted.
+
 
 # Calculating the Cumulated Balance
 
