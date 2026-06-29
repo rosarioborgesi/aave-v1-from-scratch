@@ -20,10 +20,6 @@ contract ATokenHarness is AToken {
         return _cumulateBalance(user);
     }
 
-    function principalBalanceOf(address account) external view returns (uint256) {
-        return super.balanceOf(account);
-    }
-
     function mint(address account, uint256 amount) external {
         _mint(account, amount);
     }
@@ -237,6 +233,31 @@ contract ATokenTest is Test {
         assertEq(index, RAY);
         assertEq(aToken.getUserIndex(user), RAY);
         assertEq(aToken.principalBalanceOf(user), principalBalance);
+    }
+
+    // This test checks that _cumulateBalance still initializes the user's
+    // index even when the user has no principal balance.
+    //
+    // The user's previous principal balance is 0.
+    // The current reserve normalized income is 1.05 ray.
+    //
+    // Since the user has no principal balance and no redirected balance,
+    // balanceOf returns 0. That means there is no interest to mint, but the
+    // user's index should still be updated to the current reserve normalized
+    // income.
+    function testCumulateBalanceSetsIndexForUserWithNoBalance() external {
+        uint256 currentNormalizedIncome = 105e25;
+
+        core.setReserveNormalizedIncome(underlyingAsset, currentNormalizedIncome);
+
+        (uint256 previousPrincipalBalance, uint256 newPrincipalBalance, uint256 balanceIncrease, uint256 index) =
+            aToken.exposedCumulateBalance(user);
+
+        assertEq(previousPrincipalBalance, 0);
+        assertEq(newPrincipalBalance, 0);
+        assertEq(balanceIncrease, 0);
+        assertEq(index, currentNormalizedIncome);
+        assertEq(aToken.getUserIndex(user), currentNormalizedIncome);
     }
 
     // This test checks that _cumulateBalance mints the accrued interest into

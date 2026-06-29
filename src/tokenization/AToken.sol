@@ -287,4 +287,15 @@ contract AToken is ERC20 {
         return currentSupplyPrincipal.wadToRay().rayMul(i_core.getReserveNormalizedIncome(i_underlyingAssetAddress))
             .rayToWad();
     }
+
+    /**
+     * @dev returns the principal balance of the user. The principal balance is the last
+     * updated stored balance, which does not consider the perpetually accruing interest.
+     * @param _user the address of the user
+     * @return the principal balance of the user
+     *
+     */
+    function principalBalanceOf(address _user) external view returns (uint256) {
+        return super.balanceOf(_user);
+    }
 }
