@@ -524,13 +524,13 @@ function _calculateCumulatedBalance(
 ) internal view returns (uint256)
 ```
 
-This function calculates a balance including the interest accrued since the user's last index update.
+This function calculates a user's balance including the interest accrued since the user's index was last updated.
 
 The formula is:
 
 ```text
 cumulated balance =
-    balance
+    stored balance
     × current reserve normalized income
     ÷ user index
 ```
@@ -549,19 +549,294 @@ return _balance
     .rayToWad();
 ```
 
-Example:
+The ratio:
 
 ```text
-balance = 100
+current normalized income / user index
+```
+
+represents the reserve growth that occurred since the user's last balance update.
+
+For example:
+
+```text
 user index = 1.02 ray
 current normalized income = 1.071 ray
 
-cumulated balance =
-    100 × 1.071 / 1.02
-    = 105
+growth factor =
+    1.071 / 1.02
+    = 1.05
 ```
 
-The balance is converted from wad to ray because the reserve indexes use ray precision.
+This means the reserve grew by 5% relative to the user's stored index.
+
+For a stored balance of 100 tokens:
+
+```text
+cumulated balance =
+    100 × 1.05
+    = 105 tokens
+```
+
+### Example 1: the reserve has grown by 10%
+
+```text
+stored balance = 200 tokens
+user index = 1.00 ray
+current normalized income = 1.10 ray
+```
+
+First, calculate the growth factor:
+
+```text
+growth factor =
+    1.10 / 1.00
+    = 1.10
+```
+
+Then apply it to the stored balance:
+
+```text
+cumulated balance =
+    200 × 1.10
+    = 220 tokens
+```
+
+The user has earned:
+
+```text
+220 - 200 = 20 tokens
+```
+
+### Example 2: the reserve has grown, but the user entered later
+
+```text
+stored balance = 200 tokens
+user index = 1.20 ray
+current normalized income = 1.26 ray
+```
+
+The reserve normalized income has increased from `1.20` to `1.26`.
+
+The relative growth is:
+
+```text
+growth factor =
+    1.26 / 1.20
+    = 1.05
+```
+
+Therefore:
+
+```text
+cumulated balance =
+    200 × 1.05
+    = 210 tokens
+```
+
+Even though the current normalized income is `1.26`, the user does not receive 26% interest.
+
+The user only receives the 5% growth that occurred after their index was recorded at `1.20`.
+
+### Example 3: two users with the same stored balance but different indexes
+
+Assume both users have a stored balance of 100 tokens and the current normalized income is `1.20 ray`.
+
+#### User A
+
+```text
+stored balance = 100 tokens
+user index = 1.00 ray
+current normalized income = 1.20 ray
+```
+
+```text
+growth factor =
+    1.20 / 1.00
+    = 1.20
+```
+
+```text
+cumulated balance =
+    100 × 1.20
+    = 120 tokens
+```
+
+User A has earned 20 tokens.
+
+#### User B
+
+```text
+stored balance = 100 tokens
+user index = 1.10 ray
+current normalized income = 1.20 ray
+```
+
+```text
+growth factor =
+    1.20 / 1.10
+    ≈ 1.090909
+```
+
+```text
+cumulated balance =
+    100 × 1.090909
+    ≈ 109.0909 tokens
+```
+
+User B earns less because their index was updated later.
+
+The current normalized income is the same for both users, but each user's balance depends on the normalized income stored in their own user index.
+
+### Example 4: the user interacts multiple times
+
+Assume the user initially has:
+
+```text
+stored balance = 100 tokens
+user index = 1.00 ray
+```
+
+Later, the current normalized income becomes:
+
+```text
+current normalized income = 1.05 ray
+```
+
+Before updating the user's stored state, the balance is:
+
+```text
+cumulated balance =
+    100 × 1.05 / 1.00
+    = 105 tokens
+```
+
+When the user performs an action, the protocol may store:
+
+```text
+new stored balance = 105 tokens
+new user index = 1.05 ray
+```
+
+Later, the normalized income increases again:
+
+```text
+current normalized income = 1.1025 ray
+```
+
+The new cumulated balance is:
+
+```text
+cumulated balance =
+    105 × 1.1025 / 1.05
+```
+
+The relative growth factor is:
+
+```text
+1.1025 / 1.05 = 1.05
+```
+
+Therefore:
+
+```text
+cumulated balance =
+    105 × 1.05
+    = 110.25 tokens
+```
+
+The previously accrued interest becomes part of the stored balance, and the next calculation applies only the growth that happened after the latest index update.
+
+### Example 5: normalized income contains cumulative reserve growth
+
+Assume the reserve normalized income has grown as follows:
+
+```text
+reserve initialization: 1.00 ray
+after first period:      1.10 ray
+after second period:     1.21 ray
+```
+
+The value `1.21 ray` means the reserve has grown cumulatively by 21% since initialization.
+
+However, assume the user index was recorded after the first period:
+
+```text
+stored balance = 100 tokens
+user index = 1.10 ray
+current normalized income = 1.21 ray
+```
+
+The user's growth factor is:
+
+```text
+growth factor =
+    1.21 / 1.10
+    = 1.10
+```
+
+Therefore:
+
+```text
+cumulated balance =
+    100 × 1.10
+    = 110 tokens
+```
+
+The user receives only the 10% growth from `1.10` to `1.21`, not the complete 21% growth since the reserve was initialized.
+
+### Example 6: calculation using wad and ray units
+
+Assume:
+
+```text
+stored balance = 100e18
+user index = 1.02e27
+current normalized income = 1.071e27
+```
+
+The stored balance starts in wad precision:
+
+```text
+100e18
+```
+
+It is converted to ray precision:
+
+```text
+100e18 × 1e9 = 100e27
+```
+
+The normalized income is then applied:
+
+```text
+100e27 × 1.071e27 / 1e27
+= 107.1e27
+```
+
+The result is divided by the user index:
+
+```text
+107.1e27 × 1e27 / 1.02e27
+= 105e27
+```
+
+Finally, the result is converted back to wad:
+
+```text
+105e27 / 1e9
+= 105e18
+```
+
+Therefore, the returned balance is:
+
+```text
+105e18
+```
+
+which represents 105 tokens with 18 decimals.
+
+The conversion from wad to ray is necessary because the reserve normalized income and the user index are stored using ray precision.
 
 # Updating Redirected Balances
 
