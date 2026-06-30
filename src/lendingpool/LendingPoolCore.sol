@@ -424,4 +424,27 @@ contract LendingPoolCore {
         AToken aToken = AToken(s_reserves[_reserve].aTokenAddress);
         return aToken.balanceOf(_user);
     }
+
+    /**
+     * @dev returns true if the reserve is active
+     * @param _reserve the reserve address
+     * @return true if the reserve is active, false otherwise
+     *
+     */
+    function getReserveIsActive(address _reserve) external view returns (bool) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        return reserve.isActive;
+    }
+
+    /**
+     * @notice returns if a reserve is freezed
+     * @param _reserve the reserve for which the information is needed
+     * @return true if the reserve is freezed, false otherwise
+     *
+     */
+
+    function getReserveIsFreezed(address _reserve) external view returns (bool) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        return reserve.isFreezed;
+    }
 }
