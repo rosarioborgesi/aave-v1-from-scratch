@@ -71,6 +71,151 @@ contract ATokenUnitTest is Test {
     }
 
     ///////////////////////////////////////
+    //           mintOnDeposit           //
+    ///////////////////////////////////////
+
+    // This test checks the access control on mintOnDeposit.
+    //
+    // Only the LendingPool configured in the addresses provider can call
+    // mintOnDeposit. Any other caller should revert before balances or indexes
+    // are touched.
+    function testMintOnDepositRevertsWhenCallerIsNotLendingPool() external {
+        vm.expectRevert(AToken.AToken__OnlyLendingPool.selector);
+
+        aToken.mintOnDeposit(user, 100 ether);
+    }
+
+    // This test checks that the first deposit initializes the user at the
+    // current reserve normalized income.
+    //
+    // The reserve has already grown to 1.05 ray before the user deposits.
+    // Since the user had no balance during that previous period, they must
+    // not receive the earlier 5% growth.
+    //
+    // _cumulateBalance returns zero interest and sets:
+    //
+    // userIndex = 1.05 ray
+    //
+    // The new 100e18 deposit is then minted:
+    //
+    // currentBalance = 100e18 * 1.05e27 / 1.05e27
+    // currentBalance = 100e18
+    function testMintOnDepositDoesNotGivePastInterestOnFirstDeposit() external {
+        uint256 depositAmount = 100 ether;
+        uint256 currentNormalizedIncome = 105e25;
+
+        core.setReserveNormalizedIncome(underlyingAsset, currentNormalizedIncome);
+
+        vm.expectEmit(true, false, false, true, address(aToken));
+        emit AToken.MintOnDeposit(user, depositAmount, 0, currentNormalizedIncome);
+
+        vm.prank(lendingPool);
+        aToken.mintOnDeposit(user, depositAmount);
+
+        assertEq(aToken.principalBalanceOf(user), depositAmount);
+        assertEq(aToken.balanceOf(user), depositAmount);
+        assertEq(aToken.getUserIndex(user), currentNormalizedIncome);
+    }
+
+    // This test checks the first-deposit case.
+    //
+    // The user has no previous principal balance and no redirected balance.
+    // The current reserve normalized income is 1.00 ray.
+    //
+    // mintOnDeposit first calls _cumulateBalance, which initializes the user
+    // index and mints no interest because the user has no balance yet. Then it
+    // mints the deposited amount.
+    function testMintOnDepositMintsAmountAndInitializesUserIndexOnFirstDeposit() external {
+        uint256 depositAmount = 100 ether;
+
+        core.setReserveNormalizedIncome(underlyingAsset, RAY);
+
+        vm.expectEmit(true, false, false, true, address(aToken));
+        emit AToken.MintOnDeposit(user, depositAmount, 0, RAY);
+
+        vm.prank(lendingPool);
+        aToken.mintOnDeposit(user, depositAmount);
+
+        assertEq(aToken.principalBalanceOf(user), depositAmount);
+        assertEq(aToken.balanceOf(user), depositAmount);
+        assertEq(aToken.getUserIndex(user), RAY);
+    }
+
+    // This test checks that mintOnDeposit materializes accrued interest before
+    // minting the new deposit amount.
+    //
+    // The user's previous principal balance is 100e18.
+    // The user index is 1.00 ray and the current normalized income is 1.05 ray.
+    //
+    // Before the deposit, the user has accrued 5e18 of interest:
+    //
+    // balanceIncrease = 100e18 * 1.05e27 / 1e27 - 100e18
+    // balanceIncrease = 5e18
+    //
+    // mintOnDeposit first mints that 5e18 interest, updates the index, then
+    // mints the new 20e18 deposit.
+    function testMintOnDepositCumulatesAccruedInterestBeforeMintingDeposit() external {
+        uint256 principalBalance = 100 ether;
+        uint256 depositAmount = 20 ether;
+        uint256 currentNormalizedIncome = 105e25;
+
+        aToken.mint(user, principalBalance);
+        aToken.setUserIndex(user, RAY);
+        core.setReserveNormalizedIncome(underlyingAsset, currentNormalizedIncome);
+
+        vm.expectEmit(true, false, false, true, address(aToken));
+        emit AToken.MintOnDeposit(user, depositAmount, 5 ether, currentNormalizedIncome);
+
+        vm.prank(lendingPool);
+        aToken.mintOnDeposit(user, depositAmount);
+
+        assertEq(aToken.principalBalanceOf(user), 125 ether);
+        assertEq(aToken.balanceOf(user), 125 ether);
+        assertEq(aToken.getUserIndex(user), currentNormalizedIncome);
+    }
+
+    // This test checks the interest-redirection accounting during a deposit.
+    //
+    // The user redirects interest to redirectionTarget.
+    // The user has 100e18 principal and 50e18 redirected to them from someone
+    // else. Their index is 1.00 ray and the current normalized income is 1.10
+    // ray.
+    //
+    // Since the user redirects their own principal interest away, only the
+    // incoming redirected balance generates interest for the user:
+    //
+    // balanceIncrease = (50e18 * 1.10e27 / 1e27) - 50e18
+    // balanceIncrease = 5e18
+    //
+    // mintOnDeposit adds both the user's materialized 5e18 interest and the new
+    // 20e18 deposit to redirectionTarget's redirected balance.
+    function testMintOnDepositUpdatesRedirectionTargetWithBalanceIncreaseAndDepositAmount() external {
+        uint256 principalBalance = 100 ether;
+        uint256 redirectedBalance = 50 ether;
+        uint256 depositAmount = 20 ether;
+        uint256 currentNormalizedIncome = 110e25;
+
+        aToken.mint(user, principalBalance);
+        aToken.setUserIndex(user, RAY);
+        aToken.setRedirectedBalance(user, redirectedBalance);
+        aToken.setInterestRedirectionAddress(user, redirectionTarget);
+        core.setReserveNormalizedIncome(underlyingAsset, currentNormalizedIncome);
+
+        vm.expectEmit(true, false, false, true, address(aToken));
+        emit AToken.RedirectedBalanceUpdated(redirectionTarget, 0, currentNormalizedIncome, 25 ether, 0);
+        vm.expectEmit(true, false, false, true, address(aToken));
+        emit AToken.MintOnDeposit(user, depositAmount, 5 ether, currentNormalizedIncome);
+
+        vm.prank(lendingPool);
+        aToken.mintOnDeposit(user, depositAmount);
+
+        assertEq(aToken.principalBalanceOf(user), 125 ether);
+        assertEq(aToken.getUserIndex(user), currentNormalizedIncome);
+        assertEq(aToken.getUserIndex(redirectionTarget), currentNormalizedIncome);
+        assertEq(aToken.getRedirectedBalance(redirectionTarget), 25 ether);
+    }
+
+    ///////////////////////////////////////
     //             balanceOf             //
     ///////////////////////////////////////
 
