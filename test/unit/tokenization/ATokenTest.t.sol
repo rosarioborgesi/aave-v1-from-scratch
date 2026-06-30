@@ -20,6 +20,14 @@ contract ATokenHarness is AToken {
         return _cumulateBalance(user);
     }
 
+    function exposedUpdateRedirectedBalanceOfRedirectionAddress(
+        address user,
+        uint256 balanceToAdd,
+        uint256 balanceToRemove
+    ) external {
+        _updateRedirectedBalanceOfRedirectionAddress(user, balanceToAdd, balanceToRemove);
+    }
+
     function mint(address account, uint256 amount) external {
         _mint(account, amount);
     }
@@ -34,6 +42,10 @@ contract ATokenHarness is AToken {
 
     function setRedirectedBalance(address user, uint256 redirectedBalance) external {
         s_redirectedBalances[user] = redirectedBalance;
+    }
+
+    function getRedirectedBalance(address user) external view returns (uint256) {
+        return s_redirectedBalances[user];
     }
 }
 
@@ -335,6 +347,157 @@ contract ATokenTest is Test {
         assertEq(index, currentNormalizedIncome);
         assertEq(aToken.getUserIndex(user), currentNormalizedIncome);
         assertEq(aToken.principalBalanceOf(user), 115 ether);
+    }
+
+    //////////////////////////////////////////////////////////////
+    //  _updateRedirectedBalanceOfRedirectionAddress            //
+    //////////////////////////////////////////////////////////////
+
+    // This test checks the no-redirection case.
+    //
+    // The user has no configured interest redirection address.
+    //
+    // Because there is no target whose redirected balance should be updated
+    // (s_interestRedirectionAddresses[user] == address(0)),
+    // the function returns immediately. It should not touch the requested
+    // target, user indexes, or balances.
+    function testUpdateRedirectedBalanceDoesNothingWhenUserHasNoRedirection() external {
+        uint256 targetPrincipalBalance = 100 ether;
+
+        aToken.mint(redirectionTarget, targetPrincipalBalance);
+        aToken.setUserIndex(redirectionTarget, RAY);
+        aToken.setRedirectedBalance(redirectionTarget, 25 ether);
+        core.setReserveNormalizedIncome(underlyingAsset, 110e25);
+
+        aToken.exposedUpdateRedirectedBalanceOfRedirectionAddress(user, 50 ether, 10 ether);
+
+        assertEq(aToken.getRedirectedBalance(redirectionTarget), 25 ether);
+        assertEq(aToken.getUserIndex(redirectionTarget), RAY);
+        assertEq(aToken.principalBalanceOf(redirectionTarget), targetPrincipalBalance);
+    }
+
+    // This test checks that the redirection target is still cumulated when it
+    // has no principal balance but already has an incoming redirected balance.
+    //
+    // The user redirects interest to redirectionTarget.
+    //
+    // redirectionTarget principal balance = 0
+    // redirectionTarget existing redirected balance = 50e18
+    // redirectionTarget index = 1.00 ray
+    // current normalized income = 1.10 ray
+    //
+    // Before adding the new redirected balance, redirectionTarget has earned
+    // interest on the old redirected balance:
+    //
+    // balance = (50e18 * 1.10e27 / 1e27) - 50e18
+    // balance = 5e18
+    // balanceIncrease = 5e18 - 0
+    // balanceIncrease = 5e18
+    //
+    // After that, the redirected balance is updated:
+    //
+    // new redirected balance = 50e18 + 20e18 - 5e18
+    // new redirected balance = 65e18
+    function testUpdateRedirectedBalanceCumulatesTargetWithZeroPrincipalAndUpdatesRedirectedBalance() external {
+        uint256 targetRedirectedBalance = 50 ether;
+        uint256 currentNormalizedIncome = 110e25;
+
+        aToken.setInterestRedirectionAddress(user, redirectionTarget);
+        aToken.setUserIndex(redirectionTarget, RAY);
+        aToken.setRedirectedBalance(redirectionTarget, targetRedirectedBalance);
+        core.setReserveNormalizedIncome(underlyingAsset, currentNormalizedIncome);
+
+        vm.expectEmit(true, false, false, true, address(aToken));
+        emit AToken.RedirectedBalanceUpdated(redirectionTarget, 5 ether, currentNormalizedIncome, 20 ether, 5 ether);
+
+        aToken.exposedUpdateRedirectedBalanceOfRedirectionAddress(user, 20 ether, 5 ether);
+
+        assertEq(aToken.principalBalanceOf(redirectionTarget), 5 ether);
+        assertEq(aToken.getUserIndex(redirectionTarget), currentNormalizedIncome);
+        assertEq(aToken.getRedirectedBalance(redirectionTarget), 65 ether);
+    }
+
+    // This test checks that the redirection target is cumulated before its
+    // redirected balance is changed.
+    //
+    // The user redirects interest to redirectionTarget.
+    //
+    // redirectionTarget principal balance = 100e18
+    // redirectionTarget existing redirected balance = 50e18
+    // redirectionTarget index = 1.00 ray
+    // current normalized income = 1.10 ray
+    //
+    // Before adding the new redirected balance, redirectionTarget has earned
+    // interest on both its own principal and the old redirected balance:
+    //
+    // balance = ((100e18 + 50e18) * 1.10e27 / 1e27) - 50e18
+    // balance = 115e18
+    // balanceIncrease = 115e18 - 100e18
+    // balanceIncrease = 15e18
+    //
+    // After that, the redirected balance is updated:
+    //
+    // new redirected balance = 50e18 + 20e18 - 5e18
+    // new redirected balance = 65e18
+    function testUpdateRedirectedBalanceCumulatesTargetAndAddsAndRemovesRedirectedBalance() external {
+        uint256 targetPrincipalBalance = 100 ether;
+        uint256 targetRedirectedBalance = 50 ether;
+        uint256 currentNormalizedIncome = 110e25;
+
+        aToken.setInterestRedirectionAddress(user, redirectionTarget);
+        aToken.mint(redirectionTarget, targetPrincipalBalance);
+        aToken.setUserIndex(redirectionTarget, RAY);
+        aToken.setRedirectedBalance(redirectionTarget, targetRedirectedBalance);
+        core.setReserveNormalizedIncome(underlyingAsset, currentNormalizedIncome);
+
+        vm.expectEmit(true, false, false, true, address(aToken));
+        emit AToken.RedirectedBalanceUpdated(redirectionTarget, 15 ether, currentNormalizedIncome, 20 ether, 5 ether);
+
+        aToken.exposedUpdateRedirectedBalanceOfRedirectionAddress(user, 20 ether, 5 ether);
+
+        assertEq(aToken.principalBalanceOf(redirectionTarget), 115 ether);
+        assertEq(aToken.getUserIndex(redirectionTarget), currentNormalizedIncome);
+        assertEq(aToken.getRedirectedBalance(redirectionTarget), 65 ether);
+    }
+
+    // This test checks the chained-redirection case.
+    //
+    // user redirects interest to redirectionTarget.
+    // redirectionTarget redirects its own interest to secondRedirectionTarget.
+    //
+    // redirectionTarget has 100e18 principal and 50e18 redirected to it.
+    // At 1.10 ray normalized income, redirectionTarget earns 5e18 from the
+    // incoming redirected balance. Its own principal interest is redirected
+    // away, so only that 5e18 is minted into redirectionTarget by
+    // _cumulateBalance.
+    //
+    // The function then propagates only that newly materialized 5e18 interest
+    // to secondRedirectionTarget. It does not propagate user's original
+    // redirected principal.
+    function testUpdateRedirectedBalancePropagatesOnlyTargetBalanceIncreaseToNextRedirectionTarget() external {
+        address secondRedirectionTarget = makeAddr("secondRedirectionTarget");
+        uint256 targetPrincipalBalance = 100 ether;
+        uint256 targetRedirectedBalance = 50 ether;
+        uint256 secondTargetRedirectedBalance = 7 ether;
+        uint256 currentNormalizedIncome = 110e25;
+
+        aToken.setInterestRedirectionAddress(user, redirectionTarget);
+        aToken.setInterestRedirectionAddress(redirectionTarget, secondRedirectionTarget);
+        aToken.mint(redirectionTarget, targetPrincipalBalance);
+        aToken.setUserIndex(redirectionTarget, RAY);
+        aToken.setRedirectedBalance(redirectionTarget, targetRedirectedBalance);
+        aToken.setRedirectedBalance(secondRedirectionTarget, secondTargetRedirectedBalance);
+        core.setReserveNormalizedIncome(underlyingAsset, currentNormalizedIncome);
+
+        vm.expectEmit(true, false, false, true, address(aToken));
+        emit AToken.RedirectedBalanceUpdated(redirectionTarget, 5 ether, currentNormalizedIncome, 20 ether, 0);
+
+        aToken.exposedUpdateRedirectedBalanceOfRedirectionAddress(user, 20 ether, 0);
+
+        assertEq(aToken.principalBalanceOf(redirectionTarget), 105 ether);
+        assertEq(aToken.getUserIndex(redirectionTarget), currentNormalizedIncome);
+        assertEq(aToken.getRedirectedBalance(redirectionTarget), 70 ether);
+        assertEq(aToken.getRedirectedBalance(secondRedirectionTarget), 12 ether);
     }
 
     ///////////////////////////////////////
