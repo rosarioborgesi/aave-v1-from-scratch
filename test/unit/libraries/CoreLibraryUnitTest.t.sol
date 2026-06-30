@@ -81,7 +81,7 @@ contract CoreLibraryHarness {
     }
 }
 
-contract CoreLibraryTest is Test {
+contract CoreLibraryUnitTest is Test {
     using WadRayMath for uint256;
 
     uint256 private constant RAY = 1e27;

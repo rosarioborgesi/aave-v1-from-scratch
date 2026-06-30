@@ -65,7 +65,7 @@ contract LendingPoolCoreHarness is LendingPoolCore {
     }
 }
 
-contract LendingPoolCoreTest is Test {
+contract LendingPoolCoreUnitTest is Test {
     using WadRayMath for uint256;
 
     uint256 public constant RAY = 1e27;

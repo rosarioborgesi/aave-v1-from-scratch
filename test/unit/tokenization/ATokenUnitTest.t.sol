@@ -49,7 +49,7 @@ contract ATokenHarness is AToken {
     }
 }
 
-contract ATokenTest is Test {
+contract ATokenUnitTest is Test {
     uint256 private constant RAY = 1e27;
 
     address private user = makeAddr("user");

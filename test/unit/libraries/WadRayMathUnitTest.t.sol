@@ -50,7 +50,7 @@ contract WadRayMathHarness {
     }
 }
 
-contract WadRayMathTest is Test {
+contract WadRayMathUnitTest is Test {
     WadRayMathHarness internal math;
 
     uint256 internal constant WAD = 1e18;
