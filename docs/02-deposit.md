@@ -62,6 +62,34 @@ core underlying balance increases by amount
 user aToken balance increases by amount, plus any materialized interest
 ```
 
+## Contract Interaction Diagram
+
+```mermaid
+flowchart LR
+    User([User])
+
+    LendingPool[LendingPool]
+    LendingPoolCore[LendingPoolCore]
+    AToken[AToken]
+    ReserveERC20[Reserve ERC20]
+    InterestRateStrategy[Interest Rate Strategy]
+    AddressesProvider[LendingPoolAddressesProvider]
+
+    User --> LendingPool
+    User --> ReserveERC20
+
+    LendingPool --> LendingPoolCore
+    LendingPool --> AToken
+
+    LendingPoolCore --> ReserveERC20
+    LendingPoolCore --> InterestRateStrategy
+
+    LendingPool -.-> AddressesProvider
+    LendingPoolCore -.-> AddressesProvider
+    AToken -.-> AddressesProvider
+```
+
+
 ## Contracts Involved
 
 ### `LendingPool`
