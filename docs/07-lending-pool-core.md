@@ -50,6 +50,15 @@ For a deposit, it:
 4. calls LendingPoolCore.transferToReserve().
 ```
 
+For a redeem, it:
+
+```text
+1. validates that the user can withdraw the requested liquidity;
+2. burns the user's aTokens;
+3. calls LendingPoolCore.updateStateOnRedeem();
+4. calls LendingPoolCore.transferToUser().
+```
+
 ## LendingPoolConfigurator
 
 `LendingPoolConfigurator` performs administrative reserve operations such as:
@@ -98,7 +107,9 @@ Only the current `LendingPool` registered in the addresses provider can call ope
 
 ```text
 updateStateOnDeposit()
+updateStateOnRedeem()
 transferToReserve()
+transferToUser()
 setUserUseReserveAsCollateral()
 ```
 
@@ -373,6 +384,130 @@ msg.value = 1.2 ETH
 core keeps = 1 ETH
 user receives refund = 0.2 ETH
 ```
+
+# Redeem State Update
+
+## `updateStateOnRedeem`
+
+```solidity
+function updateStateOnRedeem(
+    address _reserve,
+    address _user,
+    uint256 _amountRedeemed,
+    bool _userRedeemedEverything
+) external onlyLendingPool
+```
+
+This function updates reserve and user state as part of a redeem.
+
+It does not burn aTokens and it does not transfer the redeemed asset to the user. Those actions are coordinated by `LendingPool`; `LendingPoolCore` only updates accounting state and collateral preference.
+
+The function performs three operations.
+
+## 1. Accumulate Existing Interest
+
+```solidity
+s_reserves[_reserve].updateCumulativeIndexes();
+```
+
+Before liquidity leaves the reserve, the protocol updates the reserve's cumulative indexes.
+
+This records supplier and variable-borrow interest that accrued before the redeem, using the reserve state that existed before liquidity was removed.
+
+## 2. Recalculate Reserve Rates
+
+```solidity
+_updateReserveInterestRatesAndTimestamp(
+    _reserve,
+    0,
+    _amountRedeemed
+);
+```
+
+A redeem removes liquidity, so the function passes:
+
+```text
+liquidityAdded = 0
+liquidityTaken = redeemed amount
+```
+
+The interest-rate strategy recalculates reserve rates using the projected liquidity after the redemption.
+
+## 3. Disable Collateral After Full Redeem
+
+```solidity
+if (_userRedeemedEverything) {
+    setUserUseReserveAsCollateral(
+        _reserve,
+        _user,
+        false
+    );
+}
+```
+
+If the user redeemed their entire balance in that reserve, the reserve is no longer marked as collateral for that user.
+
+This clears:
+
+```text
+s_usersReserveData[user][reserve].useAsCollateral
+```
+
+Partial redemptions leave the user's collateral preference unchanged.
+
+# Moving Redeemed Funds
+
+## `transferToUser`
+
+```solidity
+function transferToUser(
+    address _reserve,
+    address payable _user,
+    uint256 _amount
+) external onlyLendingPool
+```
+
+This function transfers reserve liquidity from `LendingPoolCore` to the user during operations such as redeem.
+
+It supports both ERC20 reserves and the native ETH reserve.
+
+# ERC20 Path
+
+When the reserve is not ETH:
+
+```solidity
+if (_reserve != EthAddressLib.ethAddress()) {
+```
+
+the core sends tokens directly to the user:
+
+```solidity
+IERC20(_reserve).safeTransfer(_user, _amount);
+```
+
+After the operation:
+
+```text
+core token balance decreases
+user token balance increases
+```
+
+# ETH Path
+
+For the ETH reserve, the core sends native ETH:
+
+```solidity
+(bool result,) =
+    _user.call{value: _amount, gas: 50000}("");
+```
+
+If the transfer fails, the transaction reverts with:
+
+```solidity
+LendingPoolCore__EthTransferFailed(_user, _amount)
+```
+
+The fixed gas stipend keeps the ETH transfer bounded while still allowing the receiver more than Solidity's old `transfer()` stipend.
 
 # Reserve Initialization
 
@@ -698,6 +833,41 @@ total stable borrows
 total variable borrows
 ```
 
+## `getReserveConfiguration`
+
+```solidity
+function getReserveConfiguration(
+    address _reserve
+)
+    external
+    view
+    returns (
+        uint256,
+        uint256,
+        uint256,
+        bool
+    )
+```
+
+This function returns several reserve configuration fields in a single external call:
+
+```text
+1. reserve decimals
+2. base LTV as collateral
+3. liquidation threshold
+4. whether usage as collateral is enabled for the reserve
+```
+
+`LendingPoolDataProvider` uses this aggregated getter to avoid making multiple external calls to `LendingPoolCore` for fields that are usually needed together.
+
+The final boolean is reserve-level configuration:
+
+```text
+reserve.usageAsCollateralEnabled
+```
+
+It answers whether the asset type can be used as collateral at all. It does not answer whether a specific user has enabled their own balance as collateral.
+
 ## `getUserUnderlyingAssetBalance`
 
 ```solidity
@@ -768,3 +938,22 @@ user.getCompoundedBorrowBalance(reserve)
 ```
 
 This is necessary because `principalBorrowBalance` is only the debt stored at the last user update. The compounded balance includes interest accrued up to the current block.
+
+## `isUserUseReserveAsCollateralEnabled`
+
+```solidity
+function isUserUseReserveAsCollateralEnabled(
+    address _reserve,
+    address _user
+) external view returns (bool)
+```
+
+Returns the user's collateral preference for a specific reserve:
+
+```solidity
+s_usersReserveData[_user][_reserve].useAsCollateral
+```
+
+This is user-level state.
+
+It answers whether that user's balance in the reserve is currently marked as collateral. For the balance to actually count as collateral in account calculations, the reserve itself must also have collateral usage enabled.
