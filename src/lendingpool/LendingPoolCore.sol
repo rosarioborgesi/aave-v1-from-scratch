@@ -1,3 +1,6 @@
+// Layout of Contract:
+// version
+// imports
 // errors
 // interfaces, libraries, contracts
 // Type declarations
@@ -42,6 +45,7 @@ contract LendingPoolCore {
     ////////////////////////////////
     //            Errors          //
     ////////////////////////////////
+    error LendingPoolCore__ZeroAddress();
     error LendingPoolCore__OnlyLendingPool();
     error LendingPoolCore__CantSendEthAndTransferErc20();
     error LendingPoolCore__MsgValueLessThanAmount();
@@ -62,8 +66,7 @@ contract LendingPoolCore {
     ////////////////////////////////
     //      State Variables       //
     ////////////////////////////////
-    LendingPoolAddressesProvider private i_addressesProvider;
-    address private i_lendingPoolAddress;
+    LendingPoolAddressesProvider private immutable i_addressesProvider;
 
     // Maps each underlying asset to its reserve data.
     // asset => ReserveData
@@ -129,8 +132,11 @@ contract LendingPoolCore {
     //          Functions         //
     ////////////////////////////////
     constructor(address _addressesProvider) {
+        if (_addressesProvider == address(0)) {
+            revert LendingPoolCore__ZeroAddress();
+        }
         i_addressesProvider = LendingPoolAddressesProvider(_addressesProvider);
-        i_lendingPoolAddress = i_addressesProvider.getLendingPool();
+
     }
 
     ////////////////////////////////
@@ -185,7 +191,7 @@ contract LendingPoolCore {
             if (msg.value > _amount) {
                 // Send back excess ETH
                 uint256 excessAmount = msg.value - _amount;
-                (bool result,) = _user.call{value: excessAmount}("");
+                (bool result,) = _user.call{value: excessAmount, gas: 50000}("");
                 if (!result) {
                     revert LendingPoolCore__EthTransferFailed(_user, excessAmount);
                 }
@@ -193,6 +199,11 @@ contract LendingPoolCore {
         }
     }
 
+    /**
+     * @dev removes the last added reserve in the reservesList array
+     * @param _reserveToRemove the address of the reserve
+     *
+     */
     function removeLastAddedReserve(address _reserveToRemove) external onlyLendingPoolConfigurator {
         uint256 reservesListLength = s_reservesList.length;
 
@@ -212,7 +223,7 @@ contract LendingPoolCore {
         }
 
         // Reset the s_reserves[lastReserve] fields
-        s_reserves[lastReserve].isActive = false;
+        /* s_reserves[lastReserve].isActive = false;
         s_reserves[lastReserve].aTokenAddress = address(0);
         s_reserves[lastReserve].decimals = 0;
         s_reserves[lastReserve].lastLiquidityCumulativeIndex = 0;
@@ -222,7 +233,8 @@ contract LendingPoolCore {
         s_reserves[lastReserve].baseLTVasCollateral = 0;
         s_reserves[lastReserve].liquidationThreshold = 0;
         s_reserves[lastReserve].liquidationBonus = 0;
-        s_reserves[lastReserve].interestRateStrategyAddress = address(0);
+        s_reserves[lastReserve].interestRateStrategyAddress = address(0); */
+        delete s_reserves[lastReserve];
 
         s_isReserveAdded[lastReserve] = false;
         s_reservesList.pop();
@@ -248,6 +260,48 @@ contract LendingPoolCore {
         _addReserveToList(_reserve);
 
         emit ReserveInitialized(_reserve, _aTokenAddress, _interestRateStrategyAddress);
+    }
+
+    /**
+     * @dev updates the state of the core as a result of a redeem action
+     * This function is called by LendingPool when a user redeems underlying liquidity by burning aTokens
+     * @param _reserve the address of the reserve in which the redeem is happening
+     * @param _user the address of the the user redeeming
+     * @param _amountRedeemed the amount being redeemed
+     * @param _userRedeemedEverything true if the user is redeeming everything
+     *
+     */
+    function updateStateOnRedeem(address _reserve, address _user, uint256 _amountRedeemed, bool _userRedeemedEverything)
+        external
+        onlyLendingPool
+    {
+        // Compound liquidity and variable borrow interest
+        // So the protocol accounts for the interest accumulated since the last reserve update
+        s_reserves[_reserve].updateCumulativeIndexes();
+        _updateReserveInterestRatesAndTimestamp(_reserve, 0, _amountRedeemed);
+
+        // If user redeemed everything the useReserveAsCollateral flag is reset
+        if (_userRedeemedEverything) {
+            setUserUseReserveAsCollateral(_reserve, _user, false);
+        }
+    }
+
+    /**
+     * @dev transfers to the user a specific amount from the reserve.
+     * @param _reserve the address of the reserve where the transfer is happening
+     * @param _user the address of the user receiving the transfer
+     * @param _amount the amount being transferred
+     *
+     */
+    function transferToUser(address _reserve, address payable _user, uint256 _amount) external onlyLendingPool {
+        if (_reserve != EthAddressLib.ethAddress()) {
+            IERC20(_reserve).safeTransfer(_user, _amount);
+        } else {
+            (bool result,) = _user.call{value: _amount, gas: 50000}("");
+            if (!result) {
+                revert LendingPoolCore__EthTransferFailed(_user, _amount);
+            }
+        }
     }
 
     ////////////////////////////////
@@ -446,5 +500,38 @@ contract LendingPoolCore {
     function getReserveIsFreezed(address _reserve) external view returns (bool) {
         CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
         return reserve.isFreezed;
+    }
+
+    /**
+     * @dev this function aggregates the configuration parameters of the reserve.
+     * It's used in the LendingPoolDataProvider specifically to save gas, and avoid
+     * multiple external contract calls to fetch the same data.
+     * @param _reserve the reserve address
+     * @return the reserve decimals
+     * @return the base ltv as collateral
+     * @return the liquidation threshold
+     * @return if the reserve is used as collateral or not
+     *
+     */
+    function getReserveConfiguration(address _reserve) external view returns (uint256, uint256, uint256, bool) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+
+        return
+            (
+                reserve.decimals,
+                reserve.baseLTVasCollateral,
+                reserve.liquidationThreshold,
+                reserve.usageAsCollateralEnabled
+            );
+    }
+
+    /**
+    * @param _reserve the address of the reserve for which the information is needed
+    * @param _user the address of the user for which the information is needed
+    * @return true if the user has chosen to use the reserve as collateral, false otherwise
+    */
+    function isUserUseReserveAsCollateralEnabled(address _reserve, address _user) external view returns (bool) {
+        CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
+        return user.useAsCollateral;
     }
 }
