@@ -77,11 +77,19 @@ contract LendingPoolCoreHarness is LendingPoolCore {
     }
 }
 
+contract RejectEthReceiver {
+    receive() external payable {
+        revert();
+    }
+}
+
 contract LendingPoolCoreUnitTest is Test {
     using WadRayMath for uint256;
 
     uint256 public constant RAY = 1e27;
     uint256 public constant DEPOSIT_AMOUNT = 100 ether;
+    uint256 public constant USER_INITIAL_TOKEN_BALANCE = 1_000 ether;
+    uint256 public constant LENDING_POOL_INITIAL_ETH_BALANCE = 100 ether;
 
     address public lendingPool = makeAddr("lendingPool");
     address public configurator = makeAddr("configurator");
@@ -95,19 +103,6 @@ contract LendingPoolCoreUnitTest is Test {
     MockReserveInterestRateStrategy public strategy;
     MockLendingPoolAddressProvider public addressProvider;
 
-    event ReserveInitialized(address indexed reserve, address aTokenAddress, address interestRateStrategyAddress);
-
-    event ReserveRemoved(address indexed reserve);
-
-    event ReserveUpdated(
-        address indexed reserve,
-        uint256 liquidityRate,
-        uint256 stableBorrowRate,
-        uint256 variableBorrowRate,
-        uint256 liquidityIndex,
-        uint256 variableBorrowIndex
-    );
-
     function setUp() external {
         addressProvider = new MockLendingPoolAddressProvider(lendingPool, configurator);
         core = new LendingPoolCoreHarness(address(addressProvider));
@@ -115,15 +110,21 @@ contract LendingPoolCoreUnitTest is Test {
         token = new MockERC20("Mock Token", "MOCK");
         secondToken = new MockERC20("Second Mock Token", "SMOCK");
         strategy = new MockReserveInterestRateStrategy();
-
-        token.mint(user, 1_000 ether);
-        vm.deal(lendingPool, 100 ether);
-        vm.deal(user, 100 ether);
     }
 
     modifier withInitReserve(address _reserve) {
         vm.prank(configurator);
         core.initReserve(_reserve, aToken, 18, address(strategy));
+        _;
+    }
+
+    modifier withUserTokenBalance() {
+        token.mint(user, USER_INITIAL_TOKEN_BALANCE);
+        _;
+    }
+
+    modifier withLendingPoolEthBalance() {
+        vm.deal(lendingPool, LENDING_POOL_INITIAL_ETH_BALANCE);
         _;
     }
 
@@ -207,19 +208,19 @@ contract LendingPoolCoreUnitTest is Test {
     //     transferToReserve      //
     ////////////////////////////////
 
-    function testTransferToReserveTransfersERC20IntoCore() external {
+    function testTransferToReserveTransfersERC20IntoCore() external withUserTokenBalance {
         vm.prank(user);
         token.approve(address(core), DEPOSIT_AMOUNT);
 
         vm.prank(lendingPool);
         core.transferToReserve(address(token), payable(user), DEPOSIT_AMOUNT);
 
-        assertEq(token.balanceOf(user), 1_000 ether - DEPOSIT_AMOUNT);
+        assertEq(token.balanceOf(user), USER_INITIAL_TOKEN_BALANCE - DEPOSIT_AMOUNT);
 
         assertEq(token.balanceOf(address(core)), DEPOSIT_AMOUNT);
     }
 
-    function testTransferToReserveKeepsExactEthAmount() external {
+    function testTransferToReserveKeepsExactEthAmount() external withLendingPoolEthBalance {
         address ethReserve = EthAddressLib.ethAddress();
 
         vm.prank(lendingPool);
@@ -229,7 +230,7 @@ contract LendingPoolCoreUnitTest is Test {
         assertEq(address(core).balance, 1 ether);
     }
 
-    function testTransferToReserveRefundsExcessEth() external {
+    function testTransferToReserveRefundsExcessEth() external withLendingPoolEthBalance {
         address ethReserve = EthAddressLib.ethAddress();
 
         uint256 userBalanceBefore = user.balance;
@@ -245,7 +246,7 @@ contract LendingPoolCoreUnitTest is Test {
         assertEq(user.balance, userBalanceBefore + 0.2 ether);
     }
 
-    function testTransferToReserveRevertsWhenEthIsSentWithERC20() external {
+    function testTransferToReserveRevertsWhenEthIsSentWithERC20() external withLendingPoolEthBalance {
         vm.prank(user);
         token.approve(address(core), DEPOSIT_AMOUNT);
 
@@ -256,7 +257,7 @@ contract LendingPoolCoreUnitTest is Test {
         core.transferToReserve{value: 1 ether}(address(token), payable(user), DEPOSIT_AMOUNT);
     }
 
-    function testTransferToReserveRevertsWhenNotEnoughEthIsSent() external {
+    function testTransferToReserveRevertsWhenNotEnoughEthIsSent() external withLendingPoolEthBalance {
         address ethReserve = EthAddressLib.ethAddress();
 
         vm.prank(lendingPool);
@@ -272,6 +273,54 @@ contract LendingPoolCoreUnitTest is Test {
         vm.expectRevert(LendingPoolCore.LendingPoolCore__OnlyLendingPool.selector);
 
         core.transferToReserve(address(token), payable(user), DEPOSIT_AMOUNT);
+    }
+
+    ////////////////////////////////
+    //       transferToUser       //
+    ////////////////////////////////
+
+    function testTransferToUserTransfersERC20FromCore() external {
+        token.mint(address(core), 1 ether);
+
+        vm.prank(lendingPool);
+        core.transferToUser(address(token), payable(user), 1 ether);
+
+        assertEq(token.balanceOf(address(core)), 0);
+        assertEq(token.balanceOf(user), 1 ether);
+    }
+
+    function testTransferToUserTransfersEthFromCore() external {
+        vm.deal(address(core), 1 ether);
+
+        vm.prank(lendingPool);
+        core.transferToUser(EthAddressLib.ethAddress(), payable(user), 1 ether);
+
+        assertEq(address(core).balance, 0);
+        assertEq(user.balance, 1 ether);
+    }
+
+    function testTransferToUserRevertsWhenCallerIsNotLendingPool() external {
+        vm.prank(attacker);
+
+        vm.expectRevert(LendingPoolCore.LendingPoolCore__OnlyLendingPool.selector);
+
+        core.transferToUser(address(token), payable(user), DEPOSIT_AMOUNT);
+    }
+
+    function testTransferToUserRevertsWhenEthTransferFails() external {
+        RejectEthReceiver receiver = new RejectEthReceiver();
+
+        vm.deal(address(core), 1 ether);
+
+        vm.prank(lendingPool);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                LendingPoolCore.LendingPoolCore__EthTransferFailed.selector, address(receiver), 1 ether
+            )
+        );
+
+        core.transferToUser(EthAddressLib.ethAddress(), payable(address(receiver)), 1 ether);
     }
 
     ////////////////////////////////
@@ -300,7 +349,7 @@ contract LendingPoolCoreUnitTest is Test {
 
         vm.expectEmit(true, false, false, true);
 
-        emit ReserveUpdated(address(token), liquidityRate, stableBorrowRate, variableBorrowRate, RAY, RAY);
+        emit LendingPoolCore.ReserveUpdated(address(token), liquidityRate, stableBorrowRate, variableBorrowRate, RAY, RAY);
 
         vm.prank(lendingPool);
         core.updateStateOnDeposit(address(token), user, DEPOSIT_AMOUNT, false);
@@ -487,7 +536,7 @@ contract LendingPoolCoreUnitTest is Test {
 
         vm.expectEmit(true, false, false, true);
 
-        emit ReserveUpdated(address(token), liquidityRate, stableBorrowRate, variableBorrowRate, RAY, RAY);
+        emit LendingPoolCore.ReserveUpdated(address(token), liquidityRate, stableBorrowRate, variableBorrowRate, RAY, RAY);
 
         core.exposedUpdateReserveInterestRatesAndTimestamp(address(token), liquidityAdded, liquidityTaken);
 
@@ -555,7 +604,7 @@ contract LendingPoolCoreUnitTest is Test {
 
     function testRemoveLastAddedReserveResetsConfiguration() external withInitReserve(address(token)) {
         vm.expectEmit(true, false, false, false);
-        emit ReserveRemoved(address(token));
+        emit LendingPoolCore.ReserveRemoved(address(token));
 
         vm.prank(configurator);
         core.removeLastAddedReserve(address(token));
