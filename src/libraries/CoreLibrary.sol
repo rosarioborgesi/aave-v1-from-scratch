@@ -1,3 +1,6 @@
+// Layout of Contract:
+// version
+// imports
 // errors
 // interfaces, libraries, contracts
 // Type declarations
@@ -35,11 +38,6 @@ library CoreLibrary {
     //            Libraries          //
     ///////////////////////////////////
     using WadRayMath for uint256;
-
-    ////////////////////////////////
-    //      State Variables       //
-    ////////////////////////////////
-    uint256 internal constant SECONDS_PER_YEAR = 365 days;
 
     ///////////////////////////////////////////
     //            Type Declarations          //
@@ -109,6 +107,11 @@ library CoreLibrary {
         // isFreezed = true means the reserve only allows repays and redeems, but not deposits, new borrowings or rate swap
         bool isFreezed;
     }
+
+    ////////////////////////////////
+    //      State Variables       //
+    ////////////////////////////////
+    uint256 internal constant SECONDS_PER_YEAR = 365 days;
 
     //////////////////////////////////
     //       External Functions     //
