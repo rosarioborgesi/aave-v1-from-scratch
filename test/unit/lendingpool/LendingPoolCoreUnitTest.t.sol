@@ -503,6 +503,121 @@ contract LendingPoolCoreUnitTest is Test {
         core.updateStateOnDeposit(address(token), user, DEPOSIT_AMOUNT, true);
     }
 
+    ////////////////////////////////
+    //     updateStateOnRedeem    //
+    ////////////////////////////////
+
+    function testUpdateStateOnRedeemStoresNewRatesAndTimestamp() external withInitReserve(address(token)) {
+        uint256 availableLiquidity = 250 ether;
+        uint256 amountRedeemed = 100 ether;
+
+        token.mint(address(core), availableLiquidity);
+
+        uint256 liquidityRate = 5e25; // 5%
+        uint256 stableBorrowRate = 8e25; // 8%
+        uint256 variableBorrowRate = 10e25; // 10%
+
+        strategy.setRates(liquidityRate, stableBorrowRate, variableBorrowRate);
+
+        uint256 updateTimestamp = block.timestamp + 30 days;
+
+        vm.warp(updateTimestamp);
+
+        vm.expectCall(
+            address(strategy),
+            abi.encodeCall(
+                IReserveInterestRateStrategy.calculateInterestRates,
+                (address(token), availableLiquidity - amountRedeemed, 0, 0, 0)
+            )
+        );
+
+        vm.expectEmit(true, false, false, true);
+
+        emit LendingPoolCore.ReserveUpdated(address(token), liquidityRate, stableBorrowRate, variableBorrowRate, RAY, RAY);
+
+        vm.prank(lendingPool);
+        core.updateStateOnRedeem(address(token), user, amountRedeemed, false);
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+
+        // Before the redeem, the reserve liquidity rate is 0.
+        //
+        // linearInterest = 1 + rate * elapsedTime / SECONDS_PER_YEAR
+        // linearInterest = 1 + 0 * 30 days / 365 days
+        // linearInterest = 1 ray
+        //
+        // newLiquidityIndex = previousLiquidityIndex * linearInterest
+        // newLiquidityIndex = 1 ray * 1 ray
+        // newLiquidityIndex = 1 ray
+        //
+        assertEq(reserve.lastLiquidityCumulativeIndex, RAY);
+
+        // Before the redeem, the reserve variable borrow rate is 0.
+        //
+        // compoundedInterest = (1 + ratePerSecond) ^ elapsedSeconds
+        // compoundedInterest = (1 + 0) ^ 30 days
+        // compoundedInterest = 1 ray
+        //
+        // newVariableBorrowIndex = previousVariableBorrowIndex * compoundedInterest
+        // newVariableBorrowIndex = 1 ray * 1 ray
+        // newVariableBorrowIndex = 1 ray
+        //
+        assertEq(reserve.lastVariableBorrowCumulativeIndex, RAY);
+
+        assertEq(reserve.currentLiquidityRate, liquidityRate);
+        assertEq(reserve.currentStableBorrowRate, stableBorrowRate);
+        assertEq(reserve.currentVariableBorrowRate, variableBorrowRate);
+        assertEq(reserve.lastUpdateTimestamp, updateTimestamp);
+    }
+
+    function testUpdateStateOnRedeemDisablesCollateralWhenUserRedeemedEverything()
+        external
+        withInitReserve(address(token))
+    {
+        token.mint(address(core), DEPOSIT_AMOUNT);
+        strategy.setRates(0, 0, 0);
+
+        vm.startPrank(lendingPool);
+
+        core.setUserUseReserveAsCollateral(address(token), user, true);
+
+        core.updateStateOnRedeem(address(token), user, DEPOSIT_AMOUNT, true);
+
+        vm.stopPrank();
+
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        assertFalse(userData.useAsCollateral);
+    }
+
+    function testUpdateStateOnRedeemKeepsCollateralEnabledWhenUserRedeemedPartially()
+        external
+        withInitReserve(address(token))
+    {
+        token.mint(address(core), DEPOSIT_AMOUNT);
+        strategy.setRates(0, 0, 0);
+
+        vm.startPrank(lendingPool);
+
+        core.setUserUseReserveAsCollateral(address(token), user, true);
+
+        core.updateStateOnRedeem(address(token), user, DEPOSIT_AMOUNT / 2, false);
+
+        vm.stopPrank();
+
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        assertTrue(userData.useAsCollateral);
+    }
+
+    function testUpdateStateOnRedeemRevertsWhenCallerIsNotLendingPool() external {
+        vm.prank(attacker);
+
+        vm.expectRevert(LendingPoolCore.LendingPoolCore__OnlyLendingPool.selector);
+
+        core.updateStateOnRedeem(address(token), user, DEPOSIT_AMOUNT, true);
+    }
+
     ////////////////////////////////////////////////
     //  _updateReserveInterestRatesAndTimestamp   //
     ////////////////////////////////////////////////
