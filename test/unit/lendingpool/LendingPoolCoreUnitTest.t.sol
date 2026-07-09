@@ -346,6 +346,7 @@ contract LendingPoolCoreUnitTest is Test {
 
         uint256 previousTimestamp = block.timestamp;
 
+        // forge-lint: disable-next-line(unsafe-typecast)
         core.setReserveLastUpdateTimestamp(address(token), uint40(previousTimestamp));
 
         uint256 updateTimestamp = previousTimestamp + 365 days;
