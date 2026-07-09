@@ -1,3 +1,6 @@
+// Layout of Contract:
+// version
+// imports
 // errors
 // interfaces, libraries, contracts
 // Type declarations
@@ -32,6 +35,7 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
     ////////////////////////////////
     //            Errors          //
     ////////////////////////////////
+    error LendingPoolAddressesProvider__ZeroAddress();
     ///////////////////////////////////
     //            Libraries          //
     ///////////////////////////////////
@@ -41,6 +45,8 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
     bytes32 private constant LENDING_POOL = "LENDING_POOL";
     bytes32 private constant LENDING_POOL_CORE = "LENDING_POOL_CORE";
     bytes32 private constant LENDING_POOL_CONFIGURATOR = "LENDING_POOL_CONFIGURATOR";
+    bytes32 private constant DATA_PROVIDER = "DATA_PROVIDER";
+    bytes32 private constant PRICE_ORACLE = "PRICE_ORACLE";
 
     ////////////////////////////////
     //           Events           //
@@ -48,6 +54,9 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
     event LendingPoolUpdated(address indexed newAddress);
     event LendingPoolCoreUpdated(address indexed newAddress);
     event LendingPoolConfiguratorUpdated(address indexed newAddress);
+    event LendingPoolDataProviderUpdated(address indexed newAddress);
+    event PriceOracleUpdated(address indexed newAddress);
+
     ////////////////////////////////
     //          Modifiers         //
     ////////////////////////////////
@@ -60,18 +69,43 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
     //     External Functions     //
     ////////////////////////////////
     function setLendingPool(address _pool) external onlyOwner {
+        if (_pool == address(0)) {
+            revert LendingPoolAddressesProvider__ZeroAddress();
+        }
         _setAddress(LENDING_POOL, _pool);
         emit LendingPoolUpdated(_pool);
     }
 
     function setLendingPoolCore(address _lendingPoolCore) external onlyOwner {
+        if (_lendingPoolCore == address(0)) {
+            revert LendingPoolAddressesProvider__ZeroAddress();
+        }
         _setAddress(LENDING_POOL_CORE, _lendingPoolCore);
         emit LendingPoolCoreUpdated(_lendingPoolCore);
     }
 
     function setLendingPoolConfigurator(address _configurator) external onlyOwner {
+        if (_configurator == address(0)) {
+            revert LendingPoolAddressesProvider__ZeroAddress();
+        }
         _setAddress(LENDING_POOL_CONFIGURATOR, _configurator);
         emit LendingPoolConfiguratorUpdated(_configurator);
+    }
+
+    function setLendingPoolDataProvider(address _provider) external onlyOwner {
+        if (_provider == address(0)) {
+            revert LendingPoolAddressesProvider__ZeroAddress();
+        }
+        _setAddress(DATA_PROVIDER, _provider);
+        emit LendingPoolDataProviderUpdated(_provider);
+    }
+
+    function setPriceOracle(address _priceOracle) external onlyOwner {
+        if (_priceOracle == address(0)) {
+            revert LendingPoolAddressesProvider__ZeroAddress();
+        }
+        _setAddress(PRICE_ORACLE, _priceOracle);
+        emit PriceOracleUpdated(_priceOracle);
     }
 
     ////////////////////////////////
@@ -96,5 +130,13 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
 
     function getLendingPoolConfigurator() public view returns (address) {
         return getAddress(LENDING_POOL_CONFIGURATOR);
+    }
+
+    function getLendingPoolDataProvider() external view returns (address) {
+        return getAddress(DATA_PROVIDER);
+    }
+
+    function getPriceOracle() external view returns (address) {
+        return getAddress(PRICE_ORACLE);
     }
 }
