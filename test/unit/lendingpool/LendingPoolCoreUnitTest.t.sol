@@ -52,6 +52,18 @@ contract LendingPoolCoreHarness is LendingPoolCore {
         s_reserves[_reserve].lastUpdateTimestamp = _timestamp;
     }
 
+    function setReserveConfiguration(
+        address _reserve,
+        uint256 _baseLTVasCollateral,
+        uint256 _liquidationThreshold,
+        bool _usageAsCollateralEnabled
+    ) external {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        reserve.baseLTVasCollateral = _baseLTVasCollateral;
+        reserve.liquidationThreshold = _liquidationThreshold;
+        reserve.usageAsCollateralEnabled = _usageAsCollateralEnabled;
+    }
+
     function exposedUpdateReserveInterestRatesAndTimestamp(
         address _reserve,
         uint256 _liquidityAdded,
@@ -636,6 +648,21 @@ contract LendingPoolCoreUnitTest is Test {
     ////////////////////////////////
     function testGetReserveATokenAddressReturnsConfiguredAToken() external withInitReserve(address(token)) {
         assertEq(core.getReserveATokenAddress(address(token)), aToken);
+    }
+
+    ////////////////////////////////
+    //   getReserveConfiguration  //
+    ////////////////////////////////
+    function testGetReserveConfigurationReturnsConfiguredValues() external withInitReserve(address(token)) {
+        core.setReserveConfiguration(address(token), 75, 80, true);
+
+        (uint256 decimals, uint256 baseLTVasCollateral, uint256 liquidationThreshold, bool usageAsCollateralEnabled) =
+            core.getReserveConfiguration(address(token));
+
+        assertEq(decimals, 18);
+        assertEq(baseLTVasCollateral, 75);
+        assertEq(liquidationThreshold, 80);
+        assertTrue(usageAsCollateralEnabled);
     }
 
     ////////////////////////////////
