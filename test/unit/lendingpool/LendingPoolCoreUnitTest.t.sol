@@ -668,6 +668,19 @@ contract LendingPoolCoreUnitTest is Test {
         assertFalse(userData.useAsCollateral);
     }
 
+    /////////////////////////////////////////////
+    // isUserUseReserveAsCollateralEnabled     //
+    /////////////////////////////////////////////
+
+    function testIsUserUseReserveAsCollateralEnabledReturnsUserCollateralFlag() external {
+        assertFalse(core.isUserUseReserveAsCollateralEnabled(address(token), user));
+
+        vm.prank(lendingPool);
+        core.setUserUseReserveAsCollateral(address(token), user, true);
+
+        assertTrue(core.isUserUseReserveAsCollateralEnabled(address(token), user));
+    }
+
     /////////////////////////////////////
     //  getReserveAvailableLiquidity   //
     /////////////////////////////////////
