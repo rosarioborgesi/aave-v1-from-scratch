@@ -14,7 +14,7 @@ contract MockReserveInterestRateStrategy is IReserveInterestRateStrategy {
         s_variableBorrowRate = _variableBorrowRate;
     }
 
-    function getBaseVariableBorrowRate() external view override returns (uint256) {
+    function getBaseVariableBorrowRate() external pure override returns (uint256) {
         return 0;
     }
 
