@@ -401,7 +401,7 @@ contract LendingPoolCoreUnitTest is Test {
 
         core.setReserveRates(address(token), oldLiquidityRate, 0, oldVariableBorrowRate);
 
-        // Variable borrows must be greater than zero for the variable
+        // Variable borrows or stable borrows must be greater than zero for the variable
         // borrow index to be updated.
         core.setReserveBorrows(address(token), 0, 100 ether);
 
@@ -506,7 +506,8 @@ contract LendingPoolCoreUnitTest is Test {
     ////////////////////////////////
     //     updateStateOnRedeem    //
     ////////////////////////////////
-
+    // Verifies that a redeem keeps the cumulative indexes unchanged when the
+    // previous rates are zero, then stores the new rates and current timestamp.
     function testUpdateStateOnRedeemStoresNewRatesAndTimestamp() external withInitReserve(address(token)) {
         uint256 availableLiquidity = 250 ether;
         uint256 amountRedeemed = 100 ether;
@@ -567,6 +568,89 @@ contract LendingPoolCoreUnitTest is Test {
         assertEq(reserve.currentLiquidityRate, liquidityRate);
         assertEq(reserve.currentStableBorrowRate, stableBorrowRate);
         assertEq(reserve.currentVariableBorrowRate, variableBorrowRate);
+        assertEq(reserve.lastUpdateTimestamp, updateTimestamp);
+    }
+
+    // Verifies that a redeem updates the cumulative indexes using the old rates,
+    // then stores the new rates and the current timestamp.
+    function testUpdateStateOnRedeemUpdatesIndexesRatesAndTimestamp() external withInitReserve(address(token)) {
+        uint256 availableLiquidity = 250 ether;
+        uint256 amountRedeemed = 100 ether;
+
+        token.mint(address(core), availableLiquidity);
+
+        uint256 oldLiquidityRate = 5e25; // 5%
+        uint256 oldVariableBorrowRate = 10e25; // 10%
+
+        core.setReserveRates(address(token), oldLiquidityRate, 0, oldVariableBorrowRate);
+
+        // Variable borrows or stable borrows must be greater than zero for the variable
+        // borrow index to be updated.
+        core.setReserveBorrows(address(token), 0, 100 ether);
+
+        uint256 previousTimestamp = block.timestamp;
+
+        // forge-lint: disable-next-line(unsafe-typecast)
+        core.setReserveLastUpdateTimestamp(address(token), uint40(previousTimestamp));
+
+        uint256 updateTimestamp = previousTimestamp + 365 days;
+
+        vm.warp(updateTimestamp);
+
+        uint256 newLiquidityRate = 3e25; // 3%
+        uint256 newStableBorrowRate = 6e25; // 6%
+        uint256 newVariableBorrowRate = 7e25; // 7%
+
+        strategy.setRates(newLiquidityRate, newStableBorrowRate, newVariableBorrowRate);
+
+        vm.prank(lendingPool);
+
+        core.updateStateOnRedeem(address(token), user, amountRedeemed, false);
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+
+        // The liquidity index is updated using linear interest and the old
+        // liquidity rate that applied during the elapsed year.
+        //
+        // linearInterest = 1 ray + oldLiquidityRate * elapsedTime / SECONDS_PER_YEAR
+        // linearInterest = 1.00 + 5% * 365 days / 365 days
+        // linearInterest = 1.05 ray
+        //
+        // newLiquidityIndex = previousLiquidityIndex * linearInterest
+        // newLiquidityIndex = 1.00 ray * 1.05 ray
+        // newLiquidityIndex = 1.05 ray = 105e25
+        assertEq(reserve.lastLiquidityCumulativeIndex, 105e25);
+
+        // The variable borrow index is updated using compounded interest
+        // and the old variable borrow rate that applied during the year.
+        //
+        // ratePerSecond = oldVariableBorrowRate / SECONDS_PER_YEAR
+        //
+        // compoundedInterest = (1 ray + ratePerSecond) ^ elapsedSeconds
+        // compoundedInterest = (1 + 10% / 31,536,000) ^ 31,536,000
+        // compoundedInterest ≈ 1.10517 ray
+        //
+        // newVariableBorrowIndex = previousVariableBorrowIndex * compoundedInterest
+        // newVariableBorrowIndex = 1.00 ray * 1.10517 ray
+        // newVariableBorrowIndex ≈ 1.10517 ray
+        uint256 ratePerSecond = oldVariableBorrowRate / 365 days;
+
+        uint256 expectedCompoundedInterest = (RAY + ratePerSecond).rayPow(365 days);
+
+        uint256 expectedVariableBorrowIndex = RAY.rayMul(expectedCompoundedInterest);
+
+        assertEq(reserve.lastVariableBorrowCumulativeIndex, expectedVariableBorrowIndex);
+
+        // After the indexes are updated using the old rates, the rates
+        // returned by the strategy are stored for the next interest period.
+        assertEq(reserve.currentLiquidityRate, newLiquidityRate);
+
+        assertEq(reserve.currentStableBorrowRate, newStableBorrowRate);
+
+        assertEq(reserve.currentVariableBorrowRate, newVariableBorrowRate);
+
+        // The current block timestamp becomes the starting checkpoint
+        // for the next reserve interest calculation.
         assertEq(reserve.lastUpdateTimestamp, updateTimestamp);
     }
 
