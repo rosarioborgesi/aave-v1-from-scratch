@@ -7,6 +7,7 @@ contract MockLendingPoolAddressProvider {
     address private i_lendingPool;
     address private i_lendingPoolCore;
     address private i_lendingPoolConfigurator;
+    address private i_lendingPoolDataProvider;
 
     constructor(address _lendingPool, address _lendingPoolConfigurator) {
         if (_lendingPool == address(0) || _lendingPoolConfigurator == address(0)) {
@@ -23,6 +24,13 @@ contract MockLendingPoolAddressProvider {
         i_lendingPoolCore = _lendingPoolCore;
     }
 
+    function setLendingPoolDataProvider(address _lendingPoolDataProvider) external {
+        if (_lendingPoolDataProvider == address(0)) {
+            revert MockLendingPoolAddressProvider__AddressIsZero();
+        }
+        i_lendingPoolDataProvider = _lendingPoolDataProvider;
+    }
+
     function getLendingPool() external view returns (address) {
         return i_lendingPool;
     }
@@ -33,5 +41,9 @@ contract MockLendingPoolAddressProvider {
 
     function getLendingPoolConfigurator() external view returns (address) {
         return i_lendingPoolConfigurator;
+    }
+
+    function getLendingPoolDataProvider() external view returns (address) {
+        return i_lendingPoolDataProvider;
     }
 }
