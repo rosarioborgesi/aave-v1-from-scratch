@@ -11,6 +11,7 @@ import {LendingPool} from "src/lendingpool/LendingPool.sol";
 import {LendingPoolCore} from "src/lendingpool/LendingPoolCore.sol";
 import {LendingPoolAddressesProvider} from "src/configuration/LendingPoolAddressesProvider.sol";
 import {WadRayMath} from "src/libraries/WadRayMath.sol";
+import {LendingPoolDataProvider} from "src/lendingpool/LendingPoolDataProvider.sol";
 
 contract LendingPoolCoreHarness is LendingPoolCore {
     constructor(address addressesProvider) LendingPoolCore(addressesProvider) {}
@@ -26,6 +27,11 @@ contract LendingPoolCoreHarness is LendingPoolCore {
     function setReserveFreeze(address reserve, bool isFreezed) external {
         s_reserves[reserve].isFreezed = isFreezed;
     }
+
+    function setReserveBorrows(address reserve, uint256 stableBorrows, uint256 variableBorrows) external {
+        s_reserves[reserve].totalBorrowsStable = stableBorrows;
+        s_reserves[reserve].totalBorrowsVariable = variableBorrows;
+    }
 }
 
 contract LendingPoolIntegrationTest is Test {
@@ -39,6 +45,7 @@ contract LendingPoolIntegrationTest is Test {
     LendingPoolAddressesProvider public addressesProvider;
     LendingPoolCoreHarness public core;
     LendingPool public pool;
+    LendingPoolDataProvider public dataProvider;
 
     MockERC20 public dai;
     AToken public aDai;
@@ -47,11 +54,15 @@ contract LendingPoolIntegrationTest is Test {
     function setUp() external {
         addressesProvider = new LendingPoolAddressesProvider(address(this));
 
+        addressesProvider.setLendingPool(makeAddr("temporaryLendingPool"));
         core = new LendingPoolCoreHarness(address(addressesProvider));
         addressesProvider.setLendingPoolCore(address(core));
 
         pool = new LendingPool(address(addressesProvider));
         addressesProvider.setLendingPool(address(pool));
+
+        dataProvider = new LendingPoolDataProvider(address(addressesProvider));
+        addressesProvider.setLendingPoolDataProvider(address(dataProvider));
 
         addressesProvider.setLendingPoolConfigurator(configurator);
 
@@ -141,7 +152,6 @@ contract LendingPoolIntegrationTest is Test {
 
         pool.deposit(address(dai), DEPOSIT_AMOUNT, REFERRAL_CODE);
     }
-
 
     // This test checks that a second deposit is added to the user's existing
     // aToken balance and to the reserve's available liquidity.
@@ -288,6 +298,9 @@ contract LendingPoolIntegrationTest is Test {
         pool.deposit(address(dai), DEPOSIT_AMOUNT, REFERRAL_CODE);
         vm.stopPrank();
 
+        // We are simulating a borrow so that CoreLibrary.updateCumulativeIndexes can update its stored cumulative indexes
+        // because totalBorrows > 0
+        core.setReserveBorrows(address(dai), 1 ether, 0);
         vm.warp(block.timestamp + 365 days);
 
         vm.prank(user);
