@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, console} from "forge-std/Test.sol";
 
 import {MockLendingPoolCore} from "../../mocks/MockLendingPoolCore.sol";
 import {MockPriceOracle} from "../../mocks/MockPriceOracle.sol";
@@ -136,7 +136,7 @@ contract LendingPoolDataProviderUnitTest is Test {
         uint256 baseLtv = 75;
         uint256 liquidationThreshold = 80;
         bool usageAsCollateralEnabled = true;
-        
+
         core.addReserve(reserve);
         core.setReserveConfiguration(reserve, decimals, baseLtv, liquidationThreshold, usageAsCollateralEnabled);
 
@@ -170,6 +170,8 @@ contract LendingPoolDataProviderUnitTest is Test {
         uint256 liquidityBalance;
         uint256 borrowBalance;
         uint256 originationFee;
+        bool reserveUsageAsCollateralEnabled;
+        bool userUsesReserveAsCollateral;
     }
 
     // Values returned by the test function _calculateReserveValuesETH
@@ -311,7 +313,9 @@ contract LendingPoolDataProviderUnitTest is Test {
             priceInETH: 0.01 ether,
             liquidityBalance: 100 ether,
             borrowBalance: 20 ether,
-            originationFee: 1 ether
+            originationFee: 1 ether,
+            reserveUsageAsCollateralEnabled: true,
+            userUsesReserveAsCollateral: true
         });
         ReserveScenario memory secondReserveScenario = ReserveScenario({
             decimals: 6,
@@ -320,7 +324,9 @@ contract LendingPoolDataProviderUnitTest is Test {
             priceInETH: 0.5 ether,
             liquidityBalance: 4_000_000,
             borrowBalance: 1_000_000,
-            originationFee: 100_000
+            originationFee: 100_000,
+            reserveUsageAsCollateralEnabled: true,
+            userUsesReserveAsCollateral: true
         });
 
         _setUpReserve(
@@ -328,7 +334,7 @@ contract LendingPoolDataProviderUnitTest is Test {
             firstReserveScenario.decimals,
             firstReserveScenario.baseLtv,
             firstReserveScenario.liquidationThreshold,
-            true,
+            firstReserveScenario.reserveUsageAsCollateralEnabled,
             firstReserveScenario.priceInETH
         );
         _setUpReserve(
@@ -336,7 +342,7 @@ contract LendingPoolDataProviderUnitTest is Test {
             secondReserveScenario.decimals,
             secondReserveScenario.baseLtv,
             secondReserveScenario.liquidationThreshold,
-            true,
+            secondReserveScenario.reserveUsageAsCollateralEnabled,
             secondReserveScenario.priceInETH
         );
         _setUpReserve(emptyReserve, 18, 90, 95, true, 99 ether);
@@ -347,7 +353,7 @@ contract LendingPoolDataProviderUnitTest is Test {
             firstReserveScenario.liquidityBalance,
             firstReserveScenario.borrowBalance,
             firstReserveScenario.originationFee,
-            true
+            firstReserveScenario.userUsesReserveAsCollateral
         );
         core.setUserBasicReserveData(
             user,
@@ -355,7 +361,7 @@ contract LendingPoolDataProviderUnitTest is Test {
             secondReserveScenario.liquidityBalance,
             secondReserveScenario.borrowBalance,
             secondReserveScenario.originationFee,
-            true
+            secondReserveScenario.userUsesReserveAsCollateral
         );
 
         (
@@ -383,11 +389,62 @@ contract LendingPoolDataProviderUnitTest is Test {
     }
 
     function testCalculateUserGlobalDataExcludesCollateralWhenReserveOrUserDoesNotEnableIt() external {
-        _setUpReserve(reserve, 18, 75, 80, false, 0.01 ether);
-        _setUpReserve(secondReserve, 18, 50, 60, true, 0.5 ether);
+        ReserveScenario memory firstReserveScenario = ReserveScenario({
+            decimals: 18,
+            baseLtv: 75,
+            liquidationThreshold: 80,
+            priceInETH: 0.01 ether,
+            liquidityBalance: 100 ether,
+            borrowBalance: 0,
+            originationFee: 0,
+            reserveUsageAsCollateralEnabled: false,
+            userUsesReserveAsCollateral: true
+        });
+        ReserveScenario memory secondReserveScenario = ReserveScenario({
+            decimals: 18,
+            baseLtv: 50,
+            liquidationThreshold: 60,
+            priceInETH: 0.5 ether,
+            liquidityBalance: 2 ether,
+            borrowBalance: 0,
+            originationFee: 0,
+            reserveUsageAsCollateralEnabled: true,
+            userUsesReserveAsCollateral: false
+        });
 
-        core.setUserBasicReserveData(user, reserve, 100 ether, 0, 0, true);
-        core.setUserBasicReserveData(user, secondReserve, 2 ether, 0, 0, false);
+        _setUpReserve(
+            reserve,
+            firstReserveScenario.decimals,
+            firstReserveScenario.baseLtv,
+            firstReserveScenario.liquidationThreshold,
+            firstReserveScenario.reserveUsageAsCollateralEnabled,
+            firstReserveScenario.priceInETH
+        );
+        _setUpReserve(
+            secondReserve,
+            secondReserveScenario.decimals,
+            secondReserveScenario.baseLtv,
+            secondReserveScenario.liquidationThreshold,
+            secondReserveScenario.reserveUsageAsCollateralEnabled,
+            secondReserveScenario.priceInETH
+        );
+
+        core.setUserBasicReserveData(
+            user,
+            reserve,
+            firstReserveScenario.liquidityBalance,
+            firstReserveScenario.borrowBalance,
+            firstReserveScenario.originationFee,
+            firstReserveScenario.userUsesReserveAsCollateral
+        );
+        core.setUserBasicReserveData(
+            user,
+            secondReserve,
+            secondReserveScenario.liquidityBalance,
+            secondReserveScenario.borrowBalance,
+            secondReserveScenario.originationFee,
+            secondReserveScenario.userUsesReserveAsCollateral
+        );
 
         (
             uint256 totalLiquidityBalanceETH,
@@ -396,8 +453,20 @@ contract LendingPoolDataProviderUnitTest is Test {
             uint256 currentLiquidationThreshold,,
         ) = dataProvider.calculateUserGlobalData(user);
 
+        // Both supplied balances still count as liquidity, even when they do not count as collateral:
+        // first reserve liquidity = 100 tokens * 0.01 ETH = 1 ETH
+        // second reserve liquidity = 2 tokens * 0.5 ETH = 1 ETH
+        // totalLiquidityBalanceETH = 1 ETH + 1 ETH = 2 ETH
         assertEq(totalLiquidityBalanceETH, 2 ether);
+
+        // Neither reserve counts as collateral:
+        // first reserve: reserveUsageAsCollateralEnabled = false, so it is excluded
+        // second reserve: userUsesReserveAsCollateral = false, so it is excluded
+        // totalCollateralBalanceETH = 0 ETH + 0 ETH = 0 ETH
         assertEq(totalCollateralBalanceETH, 0);
+
+        // LTV and liquidation threshold are weighted averages over collateral only.
+        // Since total collateral is 0, both weighted values are 0.
         assertEq(currentLtv, 0);
         assertEq(currentLiquidationThreshold, 0);
     }
