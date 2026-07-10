@@ -329,6 +329,19 @@ contract LendingPoolDataProviderUnitTest is Test {
             userUsesReserveAsCollateral: true
         });
 
+        // Empty reserve, should not effect calculation
+        ReserveScenario memory thirdReserveScenario = ReserveScenario({
+            decimals: 18,
+            baseLtv: 90,
+            liquidationThreshold: 95,
+            priceInETH: 99 ether,
+            liquidityBalance: 0,
+            borrowBalance: 0,
+            originationFee: 0,
+            reserveUsageAsCollateralEnabled: true,
+            userUsesReserveAsCollateral: false
+        });
+
         _setUpReserve(
             reserve,
             firstReserveScenario.decimals,
@@ -345,7 +358,14 @@ contract LendingPoolDataProviderUnitTest is Test {
             secondReserveScenario.reserveUsageAsCollateralEnabled,
             secondReserveScenario.priceInETH
         );
-        _setUpReserve(emptyReserve, 18, 90, 95, true, 99 ether);
+        _setUpReserve(
+            emptyReserve,
+            thirdReserveScenario.decimals,
+            thirdReserveScenario.baseLtv,
+            thirdReserveScenario.liquidationThreshold,
+            thirdReserveScenario.reserveUsageAsCollateralEnabled,
+            thirdReserveScenario.priceInETH
+        );
 
         core.setUserBasicReserveData(
             user,
@@ -472,11 +492,37 @@ contract LendingPoolDataProviderUnitTest is Test {
     }
 
     function testCalculateUserGlobalDataMarksHealthFactorBelowThreshold() external {
-        _setUpReserve(reserve, 18, 75, 80, true, 0.01 ether);
-        core.setUserBasicReserveData(user, reserve, 100 ether, 200 ether, 0, true);
+        uint256 decimals = 18;
+        uint256 baseLtv = 75;
+        uint256 liquidationThreshold = 80;
+        bool usageAsCollateralEnabled = true;
+        uint256 priceInETH = 0.01 ether;
+
+        _setUpReserve(reserve, decimals, baseLtv, liquidationThreshold, usageAsCollateralEnabled, priceInETH);
+
+        uint256 liquidityBalance = 100 ether;
+        uint256 borrowBalance = 200 ether;
+        uint256 originationFee = 0;
+        bool useAsCollateral = true;
+
+        core.setUserBasicReserveData(user, reserve, liquidityBalance, borrowBalance, originationFee, useAsCollateral);
 
         (,,,,,, uint256 healthFactor, bool healthFactorBelowThreshold) = dataProvider.calculateUserGlobalData(user);
 
+        // User position in ETH:
+        // tokenUnit = 10 ** 18 = 1e18
+        // collateral/liquidity = 100e18 tokens * 0.01e18 ETH / 1e18 = 1e18 = 1 ETH
+        // borrow = 200e18 tokens * 0.01e18 ETH / 1e18 = 2e18 = 2 ETH
+        // fees = 0
+        //
+        // Health factor formula:
+        // healthFactor = collateral adjusted by liquidation threshold / (borrow + fees)
+        // adjustedCollateral = 1 ETH * 80 / 100 = 0.8 ETH
+        // totalDebt = 2 ETH + 0 ETH = 2 ETH
+        // healthFactor = 0.8 ETH / 2 ETH = 0.4e18
+        //
+        // Since 0.4e18 is less than the liquidation threshold of 1e18,
+        // healthFactorBelowThreshold should be true.
         assertLt(healthFactor, HEALTH_FACTOR_LIQUIDATION_THRESHOLD);
         assertTrue(healthFactorBelowThreshold);
     }
