@@ -349,7 +349,9 @@ contract LendingPoolCoreUnitTest is Test {
 
         vm.expectEmit(true, false, false, true);
 
-        emit LendingPoolCore.ReserveUpdated(address(token), liquidityRate, stableBorrowRate, variableBorrowRate, RAY, RAY);
+        emit LendingPoolCore.ReserveUpdated(
+            address(token), liquidityRate, stableBorrowRate, variableBorrowRate, RAY, RAY
+        );
 
         vm.prank(lendingPool);
         core.updateStateOnDeposit(address(token), user, DEPOSIT_AMOUNT, false);
@@ -534,7 +536,9 @@ contract LendingPoolCoreUnitTest is Test {
 
         vm.expectEmit(true, false, false, true);
 
-        emit LendingPoolCore.ReserveUpdated(address(token), liquidityRate, stableBorrowRate, variableBorrowRate, RAY, RAY);
+        emit LendingPoolCore.ReserveUpdated(
+            address(token), liquidityRate, stableBorrowRate, variableBorrowRate, RAY, RAY
+        );
 
         vm.prank(lendingPool);
         core.updateStateOnRedeem(address(token), user, amountRedeemed, false);
@@ -735,7 +739,9 @@ contract LendingPoolCoreUnitTest is Test {
 
         vm.expectEmit(true, false, false, true);
 
-        emit LendingPoolCore.ReserveUpdated(address(token), liquidityRate, stableBorrowRate, variableBorrowRate, RAY, RAY);
+        emit LendingPoolCore.ReserveUpdated(
+            address(token), liquidityRate, stableBorrowRate, variableBorrowRate, RAY, RAY
+        );
 
         core.exposedUpdateReserveInterestRatesAndTimestamp(address(token), liquidityAdded, liquidityTaken);
 
