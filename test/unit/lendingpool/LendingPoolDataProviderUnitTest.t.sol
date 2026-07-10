@@ -132,8 +132,13 @@ contract LendingPoolDataProviderUnitTest is Test {
     ////////////////////////////////
 
     function testCalculateUserGlobalDataReturnsEmptyPositionForUserWithoutBalances() external {
+        uint256 decimals = 18;
+        uint256 baseLtv = 75;
+        uint256 liquidationThreshold = 80;
+        bool usageAsCollateralEnabled = true;
+        
         core.addReserve(reserve);
-        core.setReserveConfiguration(reserve, 18, 75, 80, true);
+        core.setReserveConfiguration(reserve, decimals, baseLtv, liquidationThreshold, usageAsCollateralEnabled);
 
         (
             uint256 totalLiquidityBalanceETH,
@@ -156,13 +161,202 @@ contract LendingPoolDataProviderUnitTest is Test {
         assertFalse(healthFactorBelowThreshold);
     }
 
+    // Reserve values for the test testCalculateUserGlobalDataAggregatesBalancesAcrossReserves()
+    struct ReserveScenario {
+        uint256 decimals;
+        uint256 baseLtv;
+        uint256 liquidationThreshold;
+        uint256 priceInETH;
+        uint256 liquidityBalance;
+        uint256 borrowBalance;
+        uint256 originationFee;
+    }
+
+    // Values returned by the test function _calculateReserveValuesETH
+    struct ReserveValuesETH {
+        uint256 liquidityBalanceETH;
+        uint256 borrowBalanceETH;
+        uint256 feesETH;
+    }
+
+    // Expected values for the test testCalculateUserGlobalDataAggregatesBalancesAcrossReserves()
+    // It maps the output of the function calculateUserGlobalData()
+    struct ExpectedUserGlobalData {
+        uint256 totalLiquidityBalanceETH;
+        uint256 totalCollateralBalanceETH;
+        uint256 totalBorrowBalanceETH;
+        uint256 totalFeesETH;
+        uint256 currentLtv;
+        uint256 currentLiquidationThreshold;
+        uint256 healthFactor;
+        bool healthFactorBelowThreshold;
+    }
+
+    // Util function for _calculateExpectedGlobalData
+    // Calculates: liquidityBalanceETH, borrowBalanceETH and feesETH for a single reserve
+    function _calculateReserveValuesETH(ReserveScenario memory scenario)
+        internal
+        pure
+        returns (ReserveValuesETH memory values)
+    {
+        // Example first reserve scenario:
+        //
+        // decimals = 18
+        // liquidityBalance = 100e18
+        // priceInETH = 0.01e18
+        // originationFee = 1e18
+        // borrowBalance = 20e18
+
+        // tokenUnit = 10 ** 18
+        uint256 tokenUnit = 10 ** scenario.decimals;
+
+        // liquidityBalanceETH = liquidityBalance * priceInETH / tokenUnit
+        // liquidityBalanceETH = 100e18 * 0.01e18 / 1e18 = 1e18
+        values.liquidityBalanceETH = scenario.liquidityBalance * scenario.priceInETH / tokenUnit;
+
+        // borrowBalanceETH = borrowBalance * priceInETH / tokenUnit
+        // borrowBalanceETH = 20e18 * 0.01e18 / 1e18 = 0.2e18
+        values.borrowBalanceETH = scenario.borrowBalance * scenario.priceInETH / tokenUnit;
+
+        // feeETH = originationFee * priceInETH / tokenUnit
+        // feesETH = 1e18 * 0.01e18 / 1e18 = 0.01e18
+        values.feesETH = scenario.originationFee * scenario.priceInETH / tokenUnit;
+    }
+
+    // Util function for testCalculateUserGlobalDataAggregatesBalancesAcrossReserves
+    // Calculates the field of ExpectedUserGlobalData, used to test the results of calculateUserGlobalData()
+    function _calculateExpectedGlobalData(
+        ReserveScenario memory firstReserveScenario,
+        ReserveScenario memory secondReserveScenario
+    ) internal pure returns (ExpectedUserGlobalData memory expected) {
+        ReserveValuesETH memory firstReserveValuesETH = _calculateReserveValuesETH(firstReserveScenario);
+        ReserveValuesETH memory secondReserveValuesETH = _calculateReserveValuesETH(secondReserveScenario);
+
+        // First reserve values:
+        // decimals: 18,
+        // baseLtv: 75,
+        // liquidationThreshold: 80,
+        // priceInETH: 0.01e18,
+        // liquidityBalance: 100e18,
+        // borrowBalance: 20e18,
+        // originationFee: 1e18
+        //
+        // Second reserve values:
+        // decimals: 6,
+        // baseLtv: 50,
+        // liquidationThreshold: 60,
+        // priceInETH: 0.5e18,
+        // liquidityBalance: 4_000_000,
+        // borrowBalance: 1_000_000,
+        // originationFee: 100_000
+
+        // First reserve ETH values:
+        // tokenUnit = 10 ** 18 = 1e18
+        // liquidityBalanceETH = 100e18 * 0.01e18 / 1e18 = 1e18 = 1 ETH
+        // borrowBalanceETH = 20e18 * 0.01e18 / 1e18 = 0.2e18 = 0.2 ETH
+        // feesETH = 1e18 * 0.01e18 / 1e18 = 0.01e18 = 0.01 ETH
+        //
+        // Second reserve ETH values:
+        // tokenUnit = 10 ** 6 = 1_000_000
+        // liquidityBalanceETH = 4_000_000 * 0.5e18 / 1_000_000 = 2e18 = 2 ETH
+        // borrowBalanceETH = 1_000_000 * 0.5e18 / 1_000_000 = 0.5e18 = 0.5 ETH
+        // feesETH = 100_000 * 0.5e18 / 1_000_000 = 0.05e18 = 0.05 ETH
+
+        // Total liquidity/collateral = first reserve liquidity + second reserve liquidity
+        // Total liquidity/collateral = 1 ETH + 2 ETH = 3 ETH.
+        expected.totalLiquidityBalanceETH =
+            firstReserveValuesETH.liquidityBalanceETH + secondReserveValuesETH.liquidityBalanceETH;
+        expected.totalCollateralBalanceETH = expected.totalLiquidityBalanceETH;
+
+        // Total borrow = first reserve borrow + second reserve borrow
+        // Total borrow = 0.2 ETH + 0.5 ETH = 0.7 ETH.
+        expected.totalBorrowBalanceETH =
+            firstReserveValuesETH.borrowBalanceETH + secondReserveValuesETH.borrowBalanceETH;
+
+        // Total fees = first reserve fees + second reserve fees
+        // Total fees = 0.01 ETH + 0.05 ETH = 0.06 ETH.
+        expected.totalFeesETH = firstReserveValuesETH.feesETH + secondReserveValuesETH.feesETH;
+
+        // currentLtv = sum(collateralValueETH * reserveLtv) / totalCollateralBalanceETH
+        // currentLtv = ((1 ETH * 75) + (2 ETH * 50)) / 3 ETH
+        // currentLtv = (75 + 100) / 3 = 58.
+        expected.currentLtv =
+            ((firstReserveValuesETH.liquidityBalanceETH * firstReserveScenario.baseLtv)
+                    + (secondReserveValuesETH.liquidityBalanceETH * secondReserveScenario.baseLtv))
+                / expected.totalCollateralBalanceETH;
+
+        // currentLiquidationThreshold = sum(collateralvalueETH * liquidationThreshold) / totalCollateralBalanceETH
+        // currentLiquidationThreshold = ((1 ETH * 80) + (2 ETH * 60)) / 3 ETH
+        // currentLiquidationThreshold = (80 + 120) / 3 = 66.
+        expected.currentLiquidationThreshold =
+            ((firstReserveValuesETH.liquidityBalanceETH * firstReserveScenario.liquidationThreshold)
+                    + (secondReserveValuesETH.liquidityBalanceETH * secondReserveScenario.liquidationThreshold))
+                / expected.totalCollateralBalanceETH;
+
+        // healthFactor = TotalCollateralETH * LiquidationThreshold / (TotalBorrowsETH + TotalFeesETH)
+        // adjustedCollateral = 3 ETH * 66 / 100 = 1.98 ETH
+        // totalDebt = 0.7 ETH borrow + 0.06 ETH fees = 0.76 ETH
+        // healthFactor = 1.98 ETH / 0.76 ETH = 2.605263157894736842e18
+        expected.healthFactor = ((expected.totalCollateralBalanceETH * expected.currentLiquidationThreshold) / 100)
+        .wadDiv(expected.totalBorrowBalanceETH + expected.totalFeesETH);
+
+        expected.healthFactorBelowThreshold = expected.healthFactor < HEALTH_FACTOR_LIQUIDATION_THRESHOLD;
+    }
+
     function testCalculateUserGlobalDataAggregatesBalancesAcrossReserves() external {
-        _setUpReserve(reserve, 18, 75, 80, true, 0.01 ether);
-        _setUpReserve(secondReserve, 6, 50, 60, true, 0.5 ether);
+        ReserveScenario memory firstReserveScenario = ReserveScenario({
+            decimals: 18,
+            baseLtv: 75,
+            liquidationThreshold: 80,
+            priceInETH: 0.01 ether,
+            liquidityBalance: 100 ether,
+            borrowBalance: 20 ether,
+            originationFee: 1 ether
+        });
+        ReserveScenario memory secondReserveScenario = ReserveScenario({
+            decimals: 6,
+            baseLtv: 50,
+            liquidationThreshold: 60,
+            priceInETH: 0.5 ether,
+            liquidityBalance: 4_000_000,
+            borrowBalance: 1_000_000,
+            originationFee: 100_000
+        });
+
+        _setUpReserve(
+            reserve,
+            firstReserveScenario.decimals,
+            firstReserveScenario.baseLtv,
+            firstReserveScenario.liquidationThreshold,
+            true,
+            firstReserveScenario.priceInETH
+        );
+        _setUpReserve(
+            secondReserve,
+            secondReserveScenario.decimals,
+            secondReserveScenario.baseLtv,
+            secondReserveScenario.liquidationThreshold,
+            true,
+            secondReserveScenario.priceInETH
+        );
         _setUpReserve(emptyReserve, 18, 90, 95, true, 99 ether);
 
-        core.setUserBasicReserveData(user, reserve, 100 ether, 20 ether, 1 ether, true);
-        core.setUserBasicReserveData(user, secondReserve, 4_000_000, 1_000_000, 100_000, true);
+        core.setUserBasicReserveData(
+            user,
+            reserve,
+            firstReserveScenario.liquidityBalance,
+            firstReserveScenario.borrowBalance,
+            firstReserveScenario.originationFee,
+            true
+        );
+        core.setUserBasicReserveData(
+            user,
+            secondReserve,
+            secondReserveScenario.liquidityBalance,
+            secondReserveScenario.borrowBalance,
+            secondReserveScenario.originationFee,
+            true
+        );
 
         (
             uint256 totalLiquidityBalanceETH,
@@ -175,23 +369,17 @@ contract LendingPoolDataProviderUnitTest is Test {
             bool healthFactorBelowThreshold
         ) = dataProvider.calculateUserGlobalData(user);
 
-        uint256 expectedTotalLiquidityBalanceETH = 3 ether;
-        uint256 expectedTotalCollateralBalanceETH = 3 ether;
-        uint256 expectedTotalBorrowBalanceETH = 0.7 ether;
-        uint256 expectedTotalFeesETH = 0.06 ether;
-        uint256 expectedCurrentLtv = 58;
-        uint256 expectedCurrentLiquidationThreshold = 66;
-        uint256 expectedHealthFactor = ((expectedTotalCollateralBalanceETH * expectedCurrentLiquidationThreshold) / 100)
-        .wadDiv(expectedTotalBorrowBalanceETH + expectedTotalFeesETH);
+        ExpectedUserGlobalData memory expected =
+            _calculateExpectedGlobalData(firstReserveScenario, secondReserveScenario);
 
-        assertEq(totalLiquidityBalanceETH, expectedTotalLiquidityBalanceETH);
-        assertEq(totalCollateralBalanceETH, expectedTotalCollateralBalanceETH);
-        assertEq(totalBorrowBalanceETH, expectedTotalBorrowBalanceETH);
-        assertEq(totalFeesETH, expectedTotalFeesETH);
-        assertEq(currentLtv, expectedCurrentLtv);
-        assertEq(currentLiquidationThreshold, expectedCurrentLiquidationThreshold);
-        assertEq(healthFactor, expectedHealthFactor);
-        assertFalse(healthFactorBelowThreshold);
+        assertEq(totalLiquidityBalanceETH, expected.totalLiquidityBalanceETH);
+        assertEq(totalCollateralBalanceETH, expected.totalCollateralBalanceETH);
+        assertEq(totalBorrowBalanceETH, expected.totalBorrowBalanceETH);
+        assertEq(totalFeesETH, expected.totalFeesETH);
+        assertEq(currentLtv, expected.currentLtv);
+        assertEq(currentLiquidationThreshold, expected.currentLiquidationThreshold);
+        assertEq(healthFactor, expected.healthFactor);
+        assertEq(healthFactorBelowThreshold, expected.healthFactorBelowThreshold);
     }
 
     function testCalculateUserGlobalDataExcludesCollateralWhenReserveOrUserDoesNotEnableIt() external {
@@ -281,6 +469,4 @@ contract LendingPoolDataProviderUnitTest is Test {
 
         assertFalse(allowed);
     }
-
-
 }
