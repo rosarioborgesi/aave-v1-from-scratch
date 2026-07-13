@@ -60,6 +60,8 @@ contract ATokenIntegrationTest is Test {
     /////////////////////////////////////
     //             redeem              //
     /////////////////////////////////////
+    
+    // TODO add more tests to extends coverage and edge cases
 
     function testUserCanDepositAndRedeemUnderlying() external {
         uint256 redeemAmount = 40 ether;
