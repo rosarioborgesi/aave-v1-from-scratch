@@ -1,3 +1,6 @@
+// Layout of Contract:
+// version
+// imports
 // errors
 // interfaces, libraries, contracts
 // Type declarations
@@ -37,6 +40,8 @@ contract LendingPool is ReentrancyGuard {
     error LendingPool__ReserveIsNotActive();
     error LendingPool__ReserveIsFrozen();
     error LendingPool__ZeroAddress();
+    error LendingPool__ATokenOnly();
+    error LendingPool__InsufficientLiquidityToRedeem();
 
     ////////////////////////////////
     //      State Variables       //
@@ -60,6 +65,16 @@ contract LendingPool is ReentrancyGuard {
         address indexed _reserve, address indexed _user, uint256 _amount, uint16 indexed _referral, uint256 _timestamp
     );
 
+    /**
+     * @dev emitted during a redeem action.
+     * @param _reserve the address of the reserve
+     * @param _user the address of the user
+     * @param _amount the amount to be deposited
+     * @param _timestamp the timestamp of the action
+     *
+     */
+    event RedeemUnderlying(address indexed _reserve, address indexed _user, uint256 _amount, uint256 _timestamp);
+
     ////////////////////////////////
     //          Modifiers         //
     ////////////////////////////////
@@ -80,6 +95,19 @@ contract LendingPool is ReentrancyGuard {
     modifier onlyUnfreezedReserve(address _reserve) {
         if (i_core.getReserveIsFreezed(_reserve)) {
             revert LendingPool__ReserveIsFrozen();
+        }
+        _;
+    }
+
+    /**
+     * @dev functions affected by this modifier can only be invoked by the
+     * aToken.sol contract
+     * @param _reserve the address of the reserve
+     *
+     */
+    modifier onlyOverlyingAToken(address _reserve) {
+        if (msg.sender != i_core.getReserveATokenAddress(_reserve)) {
+            revert LendingPool__ATokenOnly();
         }
         _;
     }
@@ -135,6 +163,45 @@ contract LendingPool is ReentrancyGuard {
         i_core.transferToReserve{value: msg.value}(_reserve, payable(msg.sender), _amount);
 
         emit Deposit(_reserve, msg.sender, _amount, _referralCode, block.timestamp);
+    }
+
+    /**
+     * @dev Redeems the underlying amount of assets requested by _user.
+     * This function is executed by the overlying aToken contract in response to a redeem action.
+     * @param _reserve the address of the reserve
+     * @param _user the address of the user performing the action
+     * @param _amount the underlying amount to be redeemed
+     *
+     */
+    function redeemUnderlying(
+        address _reserve,
+        address payable _user,
+        uint256 _amount,
+        uint256 _aTokenBalanceAfterRedeem
+    )
+        external
+        nonReentrant
+        onlyOverlyingAToken(_reserve)
+        onlyActiveReserve(_reserve)
+        onlyAmountGreaterThanZero(_amount)
+    {
+        // Check available liquidity,
+        // if the user wants to redeem more liquidity then available revert
+        uint256 currentAvailableLiquidity = i_core.getReserveAvailableLiquidity(_reserve);
+        if (currentAvailableLiquidity < _amount) {
+            revert LendingPool__InsufficientLiquidityToRedeem();
+        }
+
+        // Update reserve state:
+        // 1. updates cumulative indexes
+        // 2. updates reserve interest rates after liquidity leaves
+        // 3. disables collateral usage if the user redeemed everything
+        i_core.updateStateOnRedeem(_reserve, _user, _amount, _aTokenBalanceAfterRedeem == 0);
+
+        // Transfer underlying asset to the user
+        i_core.transferToUser(_reserve, _user, _amount);
+
+        emit RedeemUnderlying(_reserve, _user, _amount, block.timestamp);
     }
 
     ////////////////////////////////
