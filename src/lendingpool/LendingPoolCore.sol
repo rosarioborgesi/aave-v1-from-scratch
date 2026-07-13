@@ -136,7 +136,6 @@ contract LendingPoolCore {
             revert LendingPoolCore__ZeroAddress();
         }
         i_addressesProvider = LendingPoolAddressesProvider(_addressesProvider);
-
     }
 
     ////////////////////////////////
@@ -526,10 +525,10 @@ contract LendingPoolCore {
     }
 
     /**
-    * @param _reserve the address of the reserve for which the information is needed
-    * @param _user the address of the user for which the information is needed
-    * @return true if the user has chosen to use the reserve as collateral, false otherwise
-    */
+     * @param _reserve the address of the reserve for which the information is needed
+     * @param _user the address of the user for which the information is needed
+     * @return true if the user has chosen to use the reserve as collateral, false otherwise
+     */
     function isUserUseReserveAsCollateralEnabled(address _reserve, address _user) external view returns (bool) {
         CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
         return user.useAsCollateral;

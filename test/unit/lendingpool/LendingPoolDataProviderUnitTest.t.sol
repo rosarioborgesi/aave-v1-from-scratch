@@ -49,6 +49,19 @@ contract LendingPoolDataProviderUnitTest is Test {
 
         dataProvider = new LendingPoolDataProviderHarness(address(addressesProvider));
     }
+    
+    // Input values for _setUpReserveScenario
+    struct ReserveScenario {
+        uint256 decimals;
+        uint256 baseLtv;
+        uint256 liquidationThreshold;
+        uint256 priceInETH;
+        uint256 liquidityBalance;
+        uint256 borrowBalance;
+        uint256 originationFee;
+        bool reserveUsageAsCollateralEnabled;
+        bool userUsesReserveAsCollateral;
+    }
 
     function _setUpReserve(
         address reserveAddress,
@@ -61,6 +74,27 @@ contract LendingPoolDataProviderUnitTest is Test {
         core.addReserve(reserveAddress);
         core.setReserveConfiguration(reserveAddress, decimals, baseLtv, liquidationThreshold, usageAsCollateralEnabled);
         oracle.setAssetPrice(reserveAddress, priceInETH);
+    }
+
+    
+    function _setUpReserveScenario(address reserveAddress, ReserveScenario memory scenario) internal {
+        _setUpReserve(
+            reserveAddress,
+            scenario.decimals,
+            scenario.baseLtv,
+            scenario.liquidationThreshold,
+            scenario.reserveUsageAsCollateralEnabled,
+            scenario.priceInETH
+        );
+
+        core.setUserBasicReserveData(
+            user,
+            reserveAddress,
+            scenario.liquidityBalance,
+            scenario.borrowBalance,
+            scenario.originationFee,
+            scenario.userUsesReserveAsCollateral
+        );
     }
 
     ////////////////////////////////
@@ -161,38 +195,7 @@ contract LendingPoolDataProviderUnitTest is Test {
         assertFalse(healthFactorBelowThreshold);
     }
 
-    // Reserve values for the test testCalculateUserGlobalDataAggregatesBalancesAcrossReserves()
-    struct ReserveScenario {
-        uint256 decimals;
-        uint256 baseLtv;
-        uint256 liquidationThreshold;
-        uint256 priceInETH;
-        uint256 liquidityBalance;
-        uint256 borrowBalance;
-        uint256 originationFee;
-        bool reserveUsageAsCollateralEnabled;
-        bool userUsesReserveAsCollateral;
-    }
-
-    function _setUpReserveScenario(address reserveAddress, ReserveScenario memory scenario) internal {
-        _setUpReserve(
-            reserveAddress,
-            scenario.decimals,
-            scenario.baseLtv,
-            scenario.liquidationThreshold,
-            scenario.reserveUsageAsCollateralEnabled,
-            scenario.priceInETH
-        );
-
-        core.setUserBasicReserveData(
-            user,
-            reserveAddress,
-            scenario.liquidityBalance,
-            scenario.borrowBalance,
-            scenario.originationFee,
-            scenario.userUsesReserveAsCollateral
-        );
-    }
+    
 
     function testCalculateUserGlobalDataAggregatesBalancesAcrossReserves() external {
         ReserveScenario memory firstReserveScenario = ReserveScenario({
@@ -402,57 +405,102 @@ contract LendingPoolDataProviderUnitTest is Test {
     //    balanceDecreaseAllowed  //
     ////////////////////////////////
 
-    function testBalanceDecreaseAllowedReturnsTrueWhenReserveCollateralIsDisabled() external {
-        _setUpReserve(reserve, 18, 75, 80, false, 0.01 ether);
-        core.setUserBasicReserveData(user, reserve, 100 ether, 200 ether, 0, true);
+    function _defaultBalanceDecreaseScenario() internal pure returns (ReserveScenario memory) {
+        return ReserveScenario({
+            decimals: 18,
+            baseLtv: 75,
+            liquidationThreshold: 80,
+            priceInETH: 0.01 ether,
+            liquidityBalance: 100 ether,
+            borrowBalance: 50 ether,
+            originationFee: 0,
+            reserveUsageAsCollateralEnabled: true,
+            userUsesReserveAsCollateral: true
+        });
+    }
 
-        bool allowed = dataProvider.balanceDecreaseAllowed(reserve, user, 100 ether);
+    function testBalanceDecreaseAllowedReturnsTrueWhenReserveCollateralIsDisabled() external {
+        ReserveScenario memory disabledCollateralReserve = _defaultBalanceDecreaseScenario();
+        disabledCollateralReserve.borrowBalance = 200 ether;
+        disabledCollateralReserve.reserveUsageAsCollateralEnabled = false;
+        _setUpReserveScenario(reserve, disabledCollateralReserve);
+
+        uint256 amountToDecrease = 100 ether;
+        bool allowed = dataProvider.balanceDecreaseAllowed(reserve, user, amountToDecrease);
 
         assertTrue(allowed);
     }
 
     function testBalanceDecreaseAllowedReturnsTrueWhenUserDoesNotUseReserveAsCollateral() external {
-        _setUpReserve(reserve, 18, 75, 80, true, 0.01 ether);
-        core.setUserBasicReserveData(user, reserve, 100 ether, 200 ether, 0, false);
+        ReserveScenario memory userDisabledCollateralReserve = _defaultBalanceDecreaseScenario();
+        userDisabledCollateralReserve.borrowBalance = 200 ether;
+        userDisabledCollateralReserve.userUsesReserveAsCollateral = false;
+        _setUpReserveScenario(reserve, userDisabledCollateralReserve);
 
-        bool allowed = dataProvider.balanceDecreaseAllowed(reserve, user, 100 ether);
+        uint256 amountToDecrease = 100 ether;
+        bool allowed = dataProvider.balanceDecreaseAllowed(reserve, user, amountToDecrease);
 
         assertTrue(allowed);
     }
 
     function testBalanceDecreaseAllowedReturnsTrueWhenUserHasNoBorrow() external {
-        _setUpReserve(reserve, 18, 75, 80, true, 0.01 ether);
-        core.setUserBasicReserveData(user, reserve, 100 ether, 0, 0, true);
+        ReserveScenario memory noBorrowReserve = _defaultBalanceDecreaseScenario();
+        noBorrowReserve.borrowBalance = 0;
+        _setUpReserveScenario(reserve, noBorrowReserve);
 
-        bool allowed = dataProvider.balanceDecreaseAllowed(reserve, user, 100 ether);
+        uint256 amountToDecrease = 100 ether;
+        bool allowed = dataProvider.balanceDecreaseAllowed(reserve, user, amountToDecrease);
 
         assertTrue(allowed);
     }
 
     function testBalanceDecreaseAllowedReturnsFalseWhenCollateralWouldBecomeZeroWithBorrow() external {
-        _setUpReserve(reserve, 18, 75, 80, true, 0.01 ether);
-        core.setUserBasicReserveData(user, reserve, 100 ether, 50 ether, 0, true);
+        ReserveScenario memory borrowedAgainstCollateralReserve = _defaultBalanceDecreaseScenario();
+        _setUpReserveScenario(reserve, borrowedAgainstCollateralReserve);
 
-        bool allowed = dataProvider.balanceDecreaseAllowed(reserve, user, 100 ether);
+        uint256 amountToDecrease = 100 ether;
+        bool allowed = dataProvider.balanceDecreaseAllowed(reserve, user, amountToDecrease);
 
         assertFalse(allowed);
     }
 
     function testBalanceDecreaseAllowedReturnsTrueWhenHealthFactorStaysAboveThreshold() external {
-        _setUpReserve(reserve, 18, 75, 80, true, 0.01 ether);
-        core.setUserBasicReserveData(user, reserve, 100 ether, 50 ether, 0, true);
+        ReserveScenario memory healthyBorrowingReserve = _defaultBalanceDecreaseScenario();
+        _setUpReserveScenario(reserve, healthyBorrowingReserve);
 
-        bool allowed = dataProvider.balanceDecreaseAllowed(reserve, user, 10 ether);
+        uint256 amountToDecrease = 10 ether;
+        bool allowed = dataProvider.balanceDecreaseAllowed(reserve, user, amountToDecrease);
 
+        // Initial collateral = 100 tokens * 0.01 ETH = 1 ETH.
+        // Borrow balance = 50 tokens * 0.01 ETH = 0.5 ETH.
+        // Decrease amount = 10 tokens * 0.01 ETH = 0.1 ETH.
+        //
+        // collateralAfterDecrease = 1 ETH - 0.1 ETH = 0.9 ETH
+        // liquidationThresholdAfterDecrease = (1 ETH * 80 - 0.1 ETH * 80) / 0.9 ETH = 80
+        // healthFactorAfterDecrease = (0.9 ETH * 80 / 100) / 0.5 ETH = 1.44e18
+        //
+        // Since 1.44e18 is above the liquidation threshold of 1e18,
+        // the balance decrease should be allowed.
         assertTrue(allowed);
     }
 
     function testBalanceDecreaseAllowedReturnsFalseWhenHealthFactorFallsBelowThreshold() external {
-        _setUpReserve(reserve, 18, 75, 80, true, 0.01 ether);
-        core.setUserBasicReserveData(user, reserve, 100 ether, 50 ether, 0, true);
+        ReserveScenario memory riskyBorrowingReserve = _defaultBalanceDecreaseScenario();
+        _setUpReserveScenario(reserve, riskyBorrowingReserve);
 
-        bool allowed = dataProvider.balanceDecreaseAllowed(reserve, user, 40 ether);
+        uint256 amountToDecrease = 40 ether;
+        bool allowed = dataProvider.balanceDecreaseAllowed(reserve, user, amountToDecrease);
 
+        // Initial collateral = 100 tokens * 0.01 ETH = 1 ETH.
+        // Borrow balance = 50 tokens * 0.01 ETH = 0.5 ETH.
+        // Decrease amount = 40 tokens * 0.01 ETH = 0.4 ETH.
+        //
+        // collateralAfterDecrease = 1 ETH - 0.4 ETH = 0.6 ETH
+        // liquidationThresholdAfterDecrease = (1 ETH * 80 - 0.4 ETH * 80) / 0.6 ETH = 80
+        // healthFactorAfterDecrease = (0.6 ETH * 80 / 100) / 0.5 ETH = 0.96e18
+        //
+        // Since 0.96e18 is below the liquidation threshold of 1e18,
+        // the balance decrease should not be allowed.
         assertFalse(allowed);
     }
 }

@@ -196,13 +196,7 @@ contract LendingPoolDataProvider {
 
         // Read the user global position
         (
-            ,
-            vars.collateralBalanceETH, // 2. Total collateral in ETH
-            vars.borrowBalanceETH, // 3. Total borrow in ETH
-            vars.totalFeesETH, // 4. Total fees in ETH
-            ,
-            vars.currentLiquidationThreshold, // 6. Current liquidation threshold
-            ,
+            , vars.collateralBalanceETH, vars.borrowBalanceETH, vars.totalFeesETH,, vars.currentLiquidationThreshold,,
         ) = calculateUserGlobalData(_user);
 
         // If the user has no borrow, allow decrease
@@ -406,6 +400,7 @@ contract LendingPoolDataProvider {
 
         // Calculate health factor
         // healthFactor = collateral adjusted by liquidation threshold / debt plus fees
+        // healthFactor = TotalCollateralETH * LiquidationThreshold / (TotalBorrowsETH + TotalFeesETH)
         //
         // Example
         // total collateral = 2 ETH
