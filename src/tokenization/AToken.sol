@@ -1,3 +1,6 @@
+// Layout of Contract:
+// version
+// imports
 // errors
 // interfaces, libraries, contracts
 // Type declarations
@@ -23,6 +26,7 @@ pragma solidity 0.8.30;
 import {ERC20} from "openzeppelin-contracts/token/ERC20/ERC20.sol";
 import {LendingPool} from "src/lendingpool/LendingPool.sol";
 import {LendingPoolAddressesProvider} from "src/configuration/LendingPoolAddressesProvider.sol";
+import {LendingPoolDataProvider} from "src/lendingpool/LendingPoolDataProvider.sol";
 import {LendingPoolCore} from "src/lendingpool/LendingPoolCore.sol";
 import {WadRayMath} from "src/libraries/WadRayMath.sol";
 
@@ -31,19 +35,25 @@ import {WadRayMath} from "src/libraries/WadRayMath.sol";
  * @dev Implementation of the interest bearing token for the DLP protocol.
  */
 contract AToken is ERC20 {
-    ///////////////////////////////////
-    //            Libraries          //
-    ///////////////////////////////////
-    using WadRayMath for uint256;
     ////////////////////////////////
     //            Errors          //
     ////////////////////////////////
     error AToken__OnlyLendingPool();
     error AToken__ZeroAddress();
+    error AToken__AmountIsZero();
+    error AToken__AmountToRedeemGreaterThanCurrentBalance();
+    error AToken__TransferNotAllowed();
+
+    ///////////////////////////////////
+    //            Libraries          //
+    ///////////////////////////////////
+    using WadRayMath for uint256;
 
     ////////////////////////////////
     //      State Variables       //
     ////////////////////////////////
+    uint256 public constant MAX_UINT = type(uint256).max;
+
     address private immutable i_underlyingAssetAddress;
     uint8 private immutable i_underlyingAssetDecimals;
 
@@ -57,12 +67,29 @@ contract AToken is ERC20 {
     LendingPoolAddressesProvider private immutable i_addressesProvider;
     LendingPoolCore private immutable i_core;
     LendingPool private immutable i_pool;
-    //TODO dataProvider
+    LendingPoolDataProvider private immutable i_dataProvider;
 
     ////////////////////////////////
     //           Events           //
     ////////////////////////////////
+    /**
+     * @dev emitted after the mint action
+     * @param _from the address performing the mint
+     * @param _value the amount to be minted
+     * @param _fromBalanceIncrease the cumulated balance since the last update of the user
+     * @param _fromIndex the last index of the user
+     *
+     */
     event MintOnDeposit(address indexed _from, uint256 _value, uint256 _fromBalanceIncrease, uint256 _fromIndex);
+    /**
+     * @dev emitted when the redirected balance of an user is being updated
+     * @param _targetAddress the address of which the balance is being updated
+     * @param _targetBalanceIncrease the cumulated balance since the last update of the target
+     * @param _targetIndex the last index of the user
+     * @param _redirectedBalanceAdded the redirected balance being added
+     * @param _redirectedBalanceRemoved the redirected balance being removed
+     *
+     */
     event RedirectedBalanceUpdated(
         address indexed _targetAddress,
         uint256 _targetBalanceIncrease,
@@ -70,6 +97,33 @@ contract AToken is ERC20 {
         uint256 _redirectedBalanceAdded,
         uint256 _redirectedBalanceRemoved
     );
+
+    /**
+     * @dev emitted when the accumulation of the interest
+     * by an user is redirected to another user
+     * @param _from the address from which the interest is being redirected
+     * @param _to the adress of the destination
+     * @param _fromBalanceIncrease the cumulated balance since the last update of the user
+     * @param _fromIndex the last index of the user
+     *
+     */
+    event InterestStreamRedirected(
+        address indexed _from,
+        address indexed _to,
+        uint256 _redirectedBalance,
+        uint256 _fromBalanceIncrease,
+        uint256 _fromIndex
+    );
+
+    /**
+     * @dev emitted after the redeem action
+     * @param _from the address performing the redeem
+     * @param _value the amount to be redeemed
+     * @param _fromBalanceIncrease the cumulated balance since the last update of the user
+     * @param _fromIndex the last index of the user
+     *
+     */
+    event Redeem(address indexed _from, uint256 _value, uint256 _fromBalanceIncrease, uint256 _fromIndex);
     ////////////////////////////////
     //          Modifiers         //
     ////////////////////////////////
@@ -99,14 +153,14 @@ contract AToken is ERC20 {
 
         address coreAddress = i_addressesProvider.getLendingPoolCore();
         address poolAddress = i_addressesProvider.getLendingPool();
-        if (coreAddress == address(0) || poolAddress == address(0)) {
+        address dataProviderAddress = i_addressesProvider.getLendingPoolDataProvider();
+        if (coreAddress == address(0) || poolAddress == address(0) || dataProviderAddress == address(0)) {
             revert AToken__ZeroAddress();
         }
 
         i_core = LendingPoolCore(coreAddress);
         i_pool = LendingPool(poolAddress);
-
-        // TODO dataProvider
+        i_dataProvider = LendingPoolDataProvider(dataProviderAddress);
         i_underlyingAssetAddress = _underlyingAsset;
     }
 
@@ -133,6 +187,57 @@ contract AToken is ERC20 {
         _mint(_account, _amount);
 
         emit MintOnDeposit(_account, _amount, balanceIncrease, index);
+    }
+
+    /**
+     * @dev redeems aToken for the underlying asset
+     * @param _amount the amount being redeemed
+     *
+     */
+    function redeem(uint256 _amount) external {
+        if (_amount == 0) {
+            revert AToken__AmountIsZero();
+        }
+
+        // Cumulate the balance of the user
+        (, uint256 currentBalance, uint256 balanceIncrease, uint256 index) = _cumulateBalance(msg.sender);
+
+        uint256 amountToRedeem = _amount;
+
+        // If amount is equal to type(uint256).max, the user wants to redeem everything
+        if (_amount == MAX_UINT) {
+            amountToRedeem = currentBalance;
+        }
+
+        if (amountToRedeem > currentBalance) {
+            revert AToken__AmountToRedeemGreaterThanCurrentBalance();
+        }
+
+        // Check that the user is allowed to redeem the amount
+        if (!isTransferAllowed(msg.sender, amountToRedeem)) {
+            revert AToken__TransferNotAllowed();
+        }
+
+        // If the user is redirecting his interest towards someone else,
+        // we update the redirected balance of the redirection address by adding accrued interest,
+        // and removing the amount to redeem
+        _updateRedirectedBalanceOfRedirectionAddress(msg.sender, balanceIncrease, amountToRedeem);
+
+        // burn tokens equivalent to the amount requested
+        _burn(msg.sender, amountToRedeem);
+
+        bool userIndexReset = false;
+        // Reset the user data if the remaining balance is 0
+        if (currentBalance - amountToRedeem == 0) {
+            userIndexReset = _resetDataOnZeroBalance(msg.sender);
+        }
+
+        // Executes redeem of the underlying asset
+        i_pool.redeemUnderlying(
+            i_underlyingAssetAddress, payable(msg.sender), amountToRedeem, currentBalance - amountToRedeem
+        );
+
+        emit Redeem(msg.sender, amountToRedeem, balanceIncrease, userIndexReset ? 0 : index);
     }
 
     ////////////////////////////////
@@ -244,6 +349,29 @@ contract AToken is ERC20 {
             .rayDiv(s_userIndexes[_user]).rayToWad();
     }
 
+    /**
+     * @dev function to reset the interest stream redirection and the user index, if the
+     * user has no balance left.
+     * @param _user the address of the user
+     * @return true if the user index has also been reset, false otherwise. useful to emit the proper user index value
+     *
+     */
+    function _resetDataOnZeroBalance(address _user) internal returns (bool) {
+        // If the user has 0 principal balance, the interest stream redirection gets reset
+        s_interestRedirectionAddresses[_user] = address(0);
+
+        // Emits a InterestStreamRedirected event to notify that the redirection has been reset
+        emit InterestStreamRedirected(_user, address(0), 0, 0, 0);
+
+        // If the redirected balance is also 0, we clear up the user index
+        if (s_redirectedBalances[_user] == 0) {
+            s_userIndexes[_user] = 0;
+            return true;
+        } else {
+            return false;
+        }
+    }
+
     /////////////////////////////////
     //       Private Functions     //
     /////////////////////////////////
@@ -297,5 +425,16 @@ contract AToken is ERC20 {
      */
     function principalBalanceOf(address _user) external view returns (uint256) {
         return super.balanceOf(_user);
+    }
+
+    /**
+     * @dev Used to validate transfers before actually executing them.
+     * @param _user address of the user to check
+     * @param _amount the amount to check
+     * @return true if the _user can transfer _amount, false otherwise
+     *
+     */
+    function isTransferAllowed(address _user, uint256 _amount) public view returns (bool) {
+        return i_dataProvider.balanceDecreaseAllowed(i_underlyingAssetAddress, _user, _amount);
     }
 }
