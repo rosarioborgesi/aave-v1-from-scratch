@@ -73,6 +73,52 @@ contract ATokenUnitTest is Test {
     }
 
     ///////////////////////////////////////
+    //            constructor            //
+    ///////////////////////////////////////
+
+    function testConstructorRevertsWhenAddressesProviderIsZero() external {
+        vm.expectRevert(AToken.AToken__ZeroAddress.selector);
+
+        new ATokenHarness(address(0), underlyingAsset, 18);
+    }
+
+    function testConstructorRevertsWhenUnderlyingAssetIsZero() external {
+        vm.expectRevert(AToken.AToken__ZeroAddress.selector);
+
+        new ATokenHarness(address(addressesProvider), address(0), 18);
+    }
+
+    function testConstructorRevertsWhenProviderReturnsZeroCore() external {
+        MockLendingPoolAddressProvider provider = new MockLendingPoolAddressProvider(lendingPool, configurator);
+        provider.setLendingPoolDataProvider(dataProvider);
+
+        vm.expectRevert(AToken.AToken__ZeroAddress.selector);
+
+        new ATokenHarness(address(provider), underlyingAsset, 18);
+    }
+
+    function testConstructorRevertsWhenProviderReturnsZeroPool() external {
+        vm.mockCall(
+            address(addressesProvider),
+            abi.encodeWithSelector(MockLendingPoolAddressProvider.getLendingPool.selector),
+            abi.encode(address(0))
+        );
+
+        vm.expectRevert(AToken.AToken__ZeroAddress.selector);
+
+        new ATokenHarness(address(addressesProvider), underlyingAsset, 18);
+    }
+
+    function testConstructorRevertsWhenProviderReturnsZeroDataProvider() external {
+        MockLendingPoolAddressProvider provider = new MockLendingPoolAddressProvider(lendingPool, configurator);
+        provider.setLendingPoolCore(address(core));
+
+        vm.expectRevert(AToken.AToken__ZeroAddress.selector);
+
+        new ATokenHarness(address(provider), underlyingAsset, 18);
+    }
+
+    ///////////////////////////////////////
     //           mintOnDeposit           //
     ///////////////////////////////////////
 
@@ -356,6 +402,56 @@ contract ATokenUnitTest is Test {
         core.setReserveNormalizedIncome(underlyingAsset, 110e25);
 
         assertEq(aToken.balanceOf(user), 105 ether);
+    }
+
+    ///////////////////////////////////////
+    //            totalSupply            //
+    ///////////////////////////////////////
+
+    // This test checks the empty-supply case.
+    //
+    // Even if the reserve normalized income has grown, there is no principal
+    // supply that can accrue interest, so totalSupply returns zero.
+    function testTotalSupplyReturnsZeroWhenPrincipalSupplyIsZero() external {
+        core.setReserveNormalizedIncome(underlyingAsset, 105e25);
+
+        assertEq(aToken.totalSupply(), 0);
+    }
+
+    // This test checks that totalSupply returns the stored principal supply
+    // when no interest has accrued.
+    //
+    // total principal supply = 100e18 + 40e18
+    // current normalized income = 1.00 ray
+    //
+    // totalSupply = 140e18 * 1.00e27
+    // totalSupply = 140e18
+    function testTotalSupplyReturnsPrincipalSupplyWhenNoInterestAccrued() external {
+        address secondUser = makeAddr("secondUser");
+
+        aToken.mint(user, 100 ether);
+        aToken.mint(secondUser, 40 ether);
+        core.setReserveNormalizedIncome(underlyingAsset, RAY);
+
+        assertEq(aToken.totalSupply(), 140 ether);
+    }
+
+    // This test checks that totalSupply scales the stored principal supply by
+    // the current reserve normalized income.
+    //
+    // total principal supply = 100e18 + 40e18
+    // current normalized income = 1.05 ray
+    //
+    // totalSupply = 140e18 * 1.05e27
+    // totalSupply = 147e18
+    function testTotalSupplyScalesPrincipalSupplyByCurrentNormalizedIncome() external {
+        address secondUser = makeAddr("secondUser");
+
+        aToken.mint(user, 100 ether);
+        aToken.mint(secondUser, 40 ether);
+        core.setReserveNormalizedIncome(underlyingAsset, 105e25);
+
+        assertEq(aToken.totalSupply(), 147 ether);
     }
 
     ///////////////////////////////////////
