@@ -57,6 +57,7 @@ contract ATokenUnitTest is Test {
     address private lendingPool = makeAddr("lendingPool");
     address private configurator = makeAddr("configurator");
     address private underlyingAsset = makeAddr("underlyingAsset");
+    address private dataProvider = makeAddr("dataProvider");
 
     MockLendingPoolAddressProvider private addressesProvider;
     MockLendingPoolCore private core;
@@ -66,6 +67,7 @@ contract ATokenUnitTest is Test {
         addressesProvider = new MockLendingPoolAddressProvider(lendingPool, configurator);
         core = new MockLendingPoolCore();
         addressesProvider.setLendingPoolCore(address(core));
+        addressesProvider.setLendingPoolDataProvider(dataProvider);
 
         aToken = new ATokenHarness(address(addressesProvider), underlyingAsset, 18);
     }
