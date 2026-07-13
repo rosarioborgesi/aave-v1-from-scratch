@@ -87,7 +87,7 @@ contract LendingPoolDataProviderUnitTest is Test {
             scenario.priceInETH
         );
 
-        core.setUserBasicReserveData(
+        core.setTestUserReserveData(
             user,
             reserveAddress,
             scenario.liquidityBalance,
