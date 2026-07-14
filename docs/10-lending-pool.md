@@ -2,9 +2,15 @@
 
 The `LendingPool` contract is the main user-facing entry point of the lending protocol.
 
-In the current implementation, it supports deposits.
+In the current implementation, it supports:
 
-When a user deposits an underlying asset, `LendingPool` coordinates the operation between:
+```text
+deposits
+redemptions of underlying assets
+```
+
+When a user deposits an underlying asset or redeems it through an aToken,
+`LendingPool` coordinates the operation between:
 
 ```text
 the user
@@ -12,9 +18,9 @@ LendingPoolCore
 the reserve's AToken
 ```
 
-The contract does not hold the deposited assets directly.
+The contract does not hold reserve assets directly.
 
-Instead, it:
+For deposits, it:
 
 ```text
 validates the deposit
@@ -24,36 +30,16 @@ transfers the underlying asset to LendingPoolCore
 emits the Deposit event
 ```
 
-# Architecture
+For redemptions, it:
 
 ```text
-User
-  │
-  │ deposit()
-  ▼
-LendingPool
-  │
-  ├── updateStateOnDeposit()
-  │           │
-  │           ▼
-  │     LendingPoolCore
-  │
-  ├── mintOnDeposit()
-  │           │
-  │           ▼
-  │         AToken
-  │
-  └── transferToReserve()
-              │
-              ▼
-        LendingPoolCore
+accepts calls only from the reserve's aToken
+validates the reserve and amount
+checks available liquidity
+updates the reserve state
+transfers the underlying asset from LendingPoolCore to the user
+emits the RedeemUnderlying event
 ```
-
-`LendingPool` acts as the coordinator.
-
-`LendingPoolCore` manages reserve accounting and stores the deposited liquidity.
-
-`AToken` represents the user's interest-bearing deposit balance.
 
 # Contract Declaration
 
@@ -63,7 +49,7 @@ contract LendingPool is ReentrancyGuard
 
 The contract inherits from OpenZeppelin's `ReentrancyGuard`.
 
-The `nonReentrant` modifier protects functions such as `deposit()` from being reentered before their execution has completed.
+The `nonReentrant` modifier protects functions such as `deposit()` and `redeemUnderlying()` from being reentered before their execution has completed.
 
 # Errors
 
@@ -73,15 +59,16 @@ The `nonReentrant` modifier protects functions such as `deposit()` from being re
 error LendingPool__AmountIsZero();
 ```
 
-This error is raised when the user attempts to deposit an amount equal to zero.
+This error is raised when an operation attempts to use an amount equal to zero.
 
 Example:
 
 ```text
 deposit amount = 0
+redeem amount = 0
 ```
 
-The transaction reverts because no meaningful deposit can be performed.
+The transaction reverts because no meaningful reserve operation can be performed.
 
 ## `LendingPool__ReserveIsNotActive`
 
@@ -89,9 +76,9 @@ The transaction reverts because no meaningful deposit can be performed.
 error LendingPool__ReserveIsNotActive();
 ```
 
-This error is raised when the user attempts to deposit into a reserve that is not active.
+This error is raised when an operation targets a reserve that is not active.
 
-Inactive reserves cannot accept new deposits.
+Inactive reserves cannot accept deposits or redemptions.
 
 ## `LendingPool__ReserveIsFrozen`
 
@@ -101,7 +88,7 @@ error LendingPool__ReserveIsFrozen();
 
 This error is raised when the user attempts to deposit into a frozen reserve.
 
-A frozen reserve may still support operations such as withdrawals or repayments, but it cannot accept new deposits.
+A frozen reserve may still support operations such as redemptions or repayments, but it cannot accept new deposits.
 
 ## `LendingPool__ZeroAddress`
 
@@ -116,6 +103,37 @@ the addresses provider is the zero address
 or
 the addresses provider returns the zero address for LendingPoolCore
 ```
+
+## `LendingPool__ATokenOnly`
+
+```solidity
+error LendingPool__ATokenOnly();
+```
+
+This error is raised when an address other than the reserve's registered aToken
+tries to call `redeemUnderlying()`.
+
+Users do not call `redeemUnderlying()` directly. They call `redeem()` on the
+aToken, and the aToken calls back into `LendingPool`.
+
+## `LendingPool__InsufficientLiquidityToRedeem`
+
+```solidity
+error LendingPool__InsufficientLiquidityToRedeem();
+```
+
+This error is raised when the requested redemption amount is greater than the
+reserve liquidity currently available in `LendingPoolCore`.
+
+Example:
+
+```text
+available liquidity = 80 DAI
+requested redeem    = 100 DAI
+```
+
+The transaction reverts because the core cannot send out more underlying
+liquidity than it currently holds.
 
 # State Variables
 
@@ -144,7 +162,8 @@ This variable stores the `LendingPoolCore` contract reference.
 read reserve configuration
 resolve the reserve's AToken
 update reserve state
-transfer deposited assets
+transfer deposited assets into LendingPoolCore
+transfer redeemed assets out to users
 ```
 
 ## `i_addressesProvider`
@@ -208,6 +227,44 @@ Integrators can use referral codes to identify deposits originating from their a
 
 The block timestamp at which the deposit was completed.
 
+# RedeemUnderlying Event
+
+```solidity
+event RedeemUnderlying(
+    address indexed _reserve,
+    address indexed _user,
+    uint256 _amount,
+    uint256 _timestamp
+);
+```
+
+The event is emitted after a successful redemption of underlying assets.
+
+It records:
+
+```text
+the reserve address
+the redeeming user
+the redeemed amount
+the timestamp
+```
+
+## `_reserve`
+
+The address identifying the reserve whose underlying asset was redeemed.
+
+## `_user`
+
+The address receiving the redeemed underlying asset.
+
+## `_amount`
+
+The amount of underlying asset sent back to the user.
+
+## `_timestamp`
+
+The block timestamp at which the redemption was completed.
+
 # Modifiers
 
 ## `onlyAmountGreaterThanZero`
@@ -224,7 +281,7 @@ modifier onlyAmountGreaterThanZero(
 }
 ```
 
-This modifier ensures that the deposit amount is greater than zero.
+This modifier ensures that the operation amount is greater than zero.
 
 Example:
 
@@ -270,11 +327,11 @@ It calls:
 i_core.getReserveIsActive(_reserve)
 ```
 
-If the result is `false`, the deposit reverts.
+If the result is `false`, the operation reverts.
 
 ```text
-active reserve   → deposit allowed
-inactive reserve → deposit rejected
+active reserve   → operation allowed
+inactive reserve → operation rejected
 ```
 
 ## `onlyUnfreezedReserve`
@@ -309,6 +366,45 @@ frozen reserve   → deposit rejected
 ```
 
 The name `onlyUnfreezedReserve` is preserved from the original Aave V1 terminology.
+
+## `onlyOverlyingAToken`
+
+```solidity
+modifier onlyOverlyingAToken(
+    address _reserve
+) {
+    if (
+        msg.sender !=
+        i_core.getReserveATokenAddress(_reserve)
+    ) {
+        revert LendingPool__ATokenOnly();
+    }
+
+    _;
+}
+```
+
+This modifier restricts `redeemUnderlying()` to the aToken registered for the
+reserve.
+
+The call path is:
+
+```text
+User
+  │ redeem()
+  ▼
+AToken
+  │ redeemUnderlying()
+  ▼
+LendingPool
+```
+
+If a user or unrelated contract calls `redeemUnderlying()` directly, the call
+reverts with:
+
+```solidity
+LendingPool__ATokenOnly()
+```
 
 # Constructor
 
@@ -895,6 +991,257 @@ the underlying asset reaches LendingPoolCore
 the whole transaction reverts if the transfer fails
 ```
 
+# Redeeming Underlying Assets
+
+## `redeemUnderlying`
+
+```solidity
+function redeemUnderlying(
+    address _reserve,
+    address payable _user,
+    uint256 _amount,
+    uint256 _aTokenBalanceAfterRedeem
+)
+    external
+    nonReentrant
+    onlyOverlyingAToken(_reserve)
+    onlyActiveReserve(_reserve)
+    onlyAmountGreaterThanZero(_amount)
+```
+
+This function redeems an underlying asset from a reserve.
+
+Users do not call it directly.
+
+Instead, the user calls `redeem()` on the aToken. The aToken validates and burns
+the user's aToken balance, then calls `LendingPool.redeemUnderlying()` to update
+protocol state and release the underlying asset.
+
+The relationship is:
+
+```text
+User burns aTokens
+        ↓
+AToken calls LendingPool.redeemUnderlying()
+        ↓
+LendingPool updates reserve state through LendingPoolCore
+        ↓
+LendingPoolCore sends underlying asset to the user
+```
+
+Example:
+
+```text
+redeem 100 aDAI
+receive 100 DAI
+```
+
+Before executing the redemption, the modifiers verify that:
+
+```text
+the function is not being reentered
+the caller is the reserve's registered aToken
+the reserve is active
+the amount is greater than zero
+```
+
+A frozen reserve is not rejected here.
+
+Freezing blocks new deposits, but users must still be able to exit an active
+reserve by redeeming their aTokens.
+
+The function then performs four operations.
+
+# 1. Check Available Liquidity
+
+```solidity
+uint256 currentAvailableLiquidity =
+    i_core.getReserveAvailableLiquidity(
+        _reserve
+    );
+
+if (currentAvailableLiquidity < _amount) {
+    revert LendingPool__InsufficientLiquidityToRedeem();
+}
+```
+
+The pool checks how much underlying liquidity is currently available in
+`LendingPoolCore`.
+
+If the requested amount is greater than the available liquidity, the redemption
+reverts.
+
+Example:
+
+```text
+available liquidity = 80 DAI
+redeem amount       = 100 DAI
+```
+
+The call reverts because the core cannot return `100 DAI` when only `80 DAI` is
+available.
+
+# 2. Update the Reserve State
+
+```solidity
+i_core.updateStateOnRedeem(
+    _reserve,
+    _user,
+    _amount,
+    _aTokenBalanceAfterRedeem == 0
+);
+```
+
+Before transferring the underlying asset, the pool asks `LendingPoolCore` to
+update reserve and user state.
+
+This operation can include:
+
+```text
+updating cumulative indexes
+updating reserve interest rates
+updating the reserve timestamp
+disabling the user's collateral flag after a full redemption
+```
+
+The last argument tells the core whether the user redeemed their entire aToken
+balance.
+
+It is derived from the user's balance after the aToken burn:
+
+```text
+_aTokenBalanceAfterRedeem == 0
+```
+
+If the user redeemed everything, the core disables that reserve as collateral
+for the user.
+
+# 3. Transfer the Underlying Asset to the User
+
+```solidity
+i_core.transferToUser(
+    _reserve,
+    _user,
+    _amount
+);
+```
+
+`LendingPoolCore` sends the redeemed underlying asset to the user.
+
+For an ERC20 reserve, the core transfers tokens to the user.
+
+```text
+LendingPoolCore
+  │ ERC20 transfer()
+  ▼
+User
+```
+
+For the native ETH reserve, the core sends ETH to the user.
+
+# 4. Emit `RedeemUnderlying`
+
+```solidity
+emit RedeemUnderlying(
+    _reserve,
+    _user,
+    _amount,
+    block.timestamp
+);
+```
+
+After the reserve state has been updated and the underlying asset has been sent,
+the contract emits the `RedeemUnderlying` event.
+
+If any previous step reverts, the entire transaction is reverted.
+
+# Complete Redeem Example
+
+Assume Alice wants to redeem:
+
+```text
+100 DAI
+```
+
+The reserve configuration is:
+
+```text
+reserve = DAI
+aToken = aDAI
+reserve active = true
+available liquidity = 1,000 DAI
+```
+
+Alice calls:
+
+```solidity
+aDAI.redeem(100 ether);
+```
+
+The aToken:
+
+```text
+calculates Alice's current aDAI balance
+checks whether the balance decrease is allowed
+burns 100 aDAI
+calls LendingPool.redeemUnderlying()
+```
+
+Then `LendingPool.redeemUnderlying()`:
+
+```text
+verifies the caller is aDAI
+verifies the DAI reserve is active
+verifies the amount is greater than zero
+checks that at least 100 DAI is available
+updates reserve accounting in LendingPoolCore
+asks LendingPoolCore to send 100 DAI to Alice
+emits RedeemUnderlying
+```
+
+The final balances are:
+
+```text
+Alice aDAI decreases by 100
+LendingPoolCore DAI decreases by 100
+Alice DAI increases by 100
+```
+
+# Redeem Order
+
+```text
+user calls redeem() on the aToken
+        ↓
+aToken validates and burns the user's aTokens
+        ↓
+aToken calls LendingPool.redeemUnderlying()
+        ↓
+LendingPool verifies the caller, reserve, and amount
+        ↓
+LendingPool checks available liquidity
+        ↓
+LendingPoolCore updates reserve and user state
+        ↓
+LendingPoolCore transfers underlying asset to the user
+        ↓
+LendingPool emits RedeemUnderlying
+```
+
+This order ensures that:
+
+```text
+users cannot bypass aToken accounting
+inactive reserves reject redemptions
+zero-value redemptions reject early
+redemptions cannot exceed available liquidity
+reserve accounting is updated before liquidity leaves
+full redemptions disable the user's collateral flag
+the whole transaction reverts if the transfer fails
+```
+
+For the full redemption flow, including the aToken and data-provider checks, see
+[`docs/11-redeem.md`](./11-redeem.md).
+
 # View Functions
 
 ## `getLendingPoolCoreAddress`
@@ -931,21 +1278,25 @@ The current `LendingPool` implementation includes:
 
 ```text
 deposit validation
+redeem validation
 active-reserve validation
 frozen-reserve validation
 zero-amount validation
+aToken-only redeem access control
+available-liquidity checks for redemptions
 reentrancy protection
 reserve-state updates
 aToken minting
 ERC20 and ETH deposit transfers
+ERC20 and ETH redeem transfers through LendingPoolCore
 deposit event emission
+redeem event emission
 protocol address getters
 ```
 
 The current contract does not yet include the other operations present in the original Aave V1 `LendingPool`, such as:
 
 ```text
-redeeming underlying assets
 borrowing
 repaying
 interest-rate switching

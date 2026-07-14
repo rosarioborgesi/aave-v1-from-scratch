@@ -36,7 +36,7 @@ AToken
 
 # Main Responsibilities
 
-The current implementation of `AToken` has five main responsibilities:
+The current implementation of `AToken` has eight main responsibilities:
 
 ```text
 1. Mint aTokens when a user deposits.
@@ -44,6 +44,9 @@ The current implementation of `AToken` has five main responsibilities:
 3. Calculate the user's current interest-bearing balance.
 4. Materialize accrued interest during state-changing actions.
 5. Track redirected interest balances.
+6. Redeem aTokens for the underlying reserve asset.
+7. Prevent redemptions that would make a borrowing position unsafe.
+8. Clear user accounting data after a full redemption when possible.
 ```
 
 # Protocol Relationships
@@ -58,6 +61,16 @@ mintOnDeposit()
 
 This prevents users from minting aTokens without depositing the underlying asset.
 
+The relationship is reversed during redemption. The user calls `redeem()` on
+the aToken, and the aToken calls:
+
+```solidity
+i_pool.redeemUnderlying(...);
+```
+
+`LendingPool` then coordinates the reserve-state update and asks
+`LendingPoolCore` to transfer the underlying asset to the user.
+
 ## LendingPoolCore
 
 `LendingPoolCore` stores the reserve liquidity index and exposes:
@@ -67,6 +80,24 @@ getReserveNormalizedIncome()
 ```
 
 `AToken` uses this value to calculate how much the user's deposit has grown.
+
+## LendingPoolDataProvider
+
+`LendingPoolDataProvider` determines whether reducing a user's aToken balance
+would leave their borrowing position healthy.
+
+During redemption, `AToken` calls:
+
+```solidity
+i_dataProvider.balanceDecreaseAllowed(
+    i_underlyingAssetAddress,
+    _user,
+    _amount
+);
+```
+
+This check matters when the aTokens being redeemed are used as collateral for
+an outstanding borrow.
 
 ## Underlying Asset
 
@@ -203,6 +234,19 @@ Stores the `LendingPool` contract.
 
 It is used by the `onlyLendingPool` modifier.
 
+It is also called by `redeem()` to return the underlying asset to the user.
+
+## `i_dataProvider`
+
+```solidity
+LendingPoolDataProvider private immutable i_dataProvider;
+```
+
+Stores the `LendingPoolDataProvider` contract.
+
+It is used by `isTransferAllowed()` to check whether a balance decrease would
+make the user's borrowing position unsafe.
+
 # Constructor
 
 ```solidity
@@ -225,6 +269,7 @@ validates the underlying asset
 stores the addresses provider
 retrieves LendingPoolCore
 retrieves LendingPool
+retrieves LendingPoolDataProvider
 stores the underlying asset
 stores the underlying asset decimals
 initializes the ERC20 name and symbol
@@ -243,9 +288,14 @@ address coreAddress =
 
 address poolAddress =
     i_addressesProvider.getLendingPool();
+
+address dataProviderAddress =
+    i_addressesProvider
+        .getLendingPoolDataProvider();
 ```
 
-The constructor also verifies that the returned core and pool addresses are not zero.
+The constructor also verifies that the returned core, pool, and data-provider
+addresses are not zero.
 
 # Minting on Deposit
 
@@ -658,6 +708,362 @@ update Alice's index to 1.05 ray
 add 5 + 20 aDAI to Bob's redirected balance
         ↓
 mint 20 aDAI for Alice's new deposit
+```
+
+
+# Redeeming the Underlying Asset
+
+## `redeem`
+
+```solidity
+function redeem(uint256 _amount) external
+```
+
+`redeem()` is the user-facing entry point for exchanging aTokens for the
+underlying reserve asset.
+
+For example:
+
+```text
+burn 40 aDAI
+receive 40 DAI
+```
+
+The aToken does not hold the DAI itself. The complete call path is:
+
+```text
+user
+  -> AToken.redeem()
+  -> LendingPool.redeemUnderlying()
+  -> LendingPoolCore transfers the underlying asset
+  -> user receives the asset
+```
+
+The function performs the following sequence:
+
+```text
+validate the requested amount
+materialize accrued interest
+resolve the amount to redeem
+check collateral safety
+update redirected-interest accounting
+burn the aTokens
+clear zero-balance data when needed
+ask LendingPool to return the underlying asset
+emit Redeem
+```
+
+## 1. Validate the Requested Amount
+
+```solidity
+if (_amount == 0) {
+    revert AToken__AmountIsZero();
+}
+```
+
+A redemption request must be greater than zero.
+
+## 2. Materialize Accrued Interest
+
+```solidity
+(
+    ,
+    uint256 currentBalance,
+    uint256 balanceIncrease,
+    uint256 index
+) = _cumulateBalance(msg.sender);
+```
+
+Before deciding how many aTokens to burn, the function converts the user's
+accrued interest into stored principal.
+
+Assume Alice has:
+
+```text
+stored principal = 100 aDAI
+accrued interest = 5 aDAI
+```
+
+After `_cumulateBalance()`:
+
+```text
+current balance = 105 aDAI
+balance increase = 5 aDAI
+stored principal = 105 aDAI
+```
+
+The redemption can therefore include interest that accrued since Alice's last
+state-changing interaction.
+
+## 3. Resolve the Redemption Amount
+
+```solidity
+uint256 amountToRedeem = _amount;
+
+if (_amount == MAX_UINT) {
+    amountToRedeem = currentBalance;
+}
+```
+
+An explicit amount redeems that number of aTokens. Passing
+`type(uint256).max` means "redeem the entire current balance," including
+accrued interest.
+
+The resolved amount cannot exceed the current balance:
+
+```solidity
+if (amountToRedeem > currentBalance) {
+    revert AToken__AmountToRedeemGreaterThanCurrentBalance();
+}
+```
+
+## 4. Check Whether the Balance Can Be Reduced
+
+```solidity
+if (!isTransferAllowed(
+    msg.sender,
+    amountToRedeem
+)) {
+    revert AToken__TransferNotAllowed();
+}
+```
+
+An aToken balance may be serving as collateral for a borrow. Before burning
+the tokens, `redeem()` asks the data provider whether removing the requested
+amount would leave the user's position above the liquidation threshold.
+
+If the check returns `false`, the entire transaction reverts. The interest
+minted by `_cumulateBalance()` is also rolled back because all steps occur in
+one atomic transaction.
+
+## 5. Update Interest Redirection
+
+```solidity
+_updateRedirectedBalanceOfRedirectionAddress(
+    msg.sender,
+    balanceIncrease,
+    amountToRedeem
+);
+```
+
+If the user redirects interest to another account, the recipient's redirected
+balance must reflect both changes made during redemption:
+
+```text
+add the interest just materialized
+remove the amount being redeemed
+```
+
+For a full redemption, this removes all of the user's principal from the
+recipient's redirected balance.
+
+## 6. Burn the aTokens
+
+```solidity
+_burn(msg.sender, amountToRedeem);
+```
+
+The redeemed aTokens are destroyed before the pool transfers the underlying
+asset.
+
+The remaining balance is:
+
+```text
+balance after redeem =
+    current balance - amount redeemed
+```
+
+## 7. Reset Empty User Data
+
+```solidity
+bool userIndexReset = false;
+
+if (currentBalance - amountToRedeem == 0) {
+    userIndexReset =
+        _resetDataOnZeroBalance(msg.sender);
+}
+```
+
+The cleanup runs only when the user redeems their complete current balance.
+Its behavior is described in detail in the
+[`_resetDataOnZeroBalance`](#_resetdataonzerobalance) section.
+
+## 8. Request the Underlying Asset
+
+```solidity
+i_pool.redeemUnderlying(
+    i_underlyingAssetAddress,
+    payable(msg.sender),
+    amountToRedeem,
+    currentBalance - amountToRedeem
+);
+```
+
+`AToken` cannot transfer the underlying asset because the reserve funds are
+held by `LendingPoolCore`. It delegates that part of the operation to
+`LendingPool`.
+
+The remaining balance is passed to the pool so reserve user data can be updated
+correctly for partial and full redemptions.
+
+If the pool cannot complete the redemption, for example because the reserve
+does not have enough available liquidity, the call reverts and the earlier
+burn and accounting changes are rolled back.
+
+## 9. Emit `Redeem`
+
+```solidity
+emit Redeem(
+    msg.sender,
+    amountToRedeem,
+    balanceIncrease,
+    userIndexReset ? 0 : index
+);
+```
+
+The event records:
+
+```text
+the user redeeming the aTokens
+the resolved redemption amount
+the interest materialized before redemption
+the user's remaining index, or zero if it was reset
+```
+
+## Complete Redemption Example
+
+Assume Alice has:
+
+```text
+stored principal = 100 aDAI
+current balance = 105 aDAI
+no outstanding borrow
+no incoming or outgoing interest redirection
+```
+
+Alice calls:
+
+```solidity
+aDAI.redeem(type(uint256).max);
+```
+
+The operation:
+
+```text
+materializes 5 aDAI of accrued interest
+resolves amountToRedeem to 105 aDAI
+confirms the balance decrease is allowed
+burns 105 aDAI
+clears Alice's redirection address and user index
+transfers 105 DAI from LendingPoolCore to Alice
+emits Redeem with an index of 0
+```
+
+Final state:
+
+```text
+Alice aDAI balance = 0
+Alice user index = 0
+Alice receives = 105 DAI
+```
+
+# Validating a Balance Decrease
+
+## `isTransferAllowed`
+
+```solidity
+function isTransferAllowed(
+    address _user,
+    uint256 _amount
+) public view returns (bool)
+```
+
+This function delegates the collateral-safety decision to
+`LendingPoolDataProvider`:
+
+```solidity
+return i_dataProvider.balanceDecreaseAllowed(
+    i_underlyingAssetAddress,
+    _user,
+    _amount
+);
+```
+
+The data provider returns `true` immediately when:
+
+```text
+the reserve cannot be used as collateral
+the user has not enabled the reserve as collateral
+the user has no outstanding borrow
+```
+
+Otherwise, it simulates the user's collateral and health factor after the
+decrease. The operation is allowed only when the resulting health factor is
+greater than `1e18`, or `1.0`.
+
+Despite the function's transfer-oriented name, the current `AToken`
+implementation calls it from `redeem()`. The inherited ERC20 `transfer()` and
+`transferFrom()` paths do not currently invoke this validation.
+
+# Resetting Data After a Full Redemption
+
+## `_resetDataOnZeroBalance`
+
+```solidity
+function _resetDataOnZeroBalance(
+    address _user
+) internal returns (bool)
+```
+
+This function cleans up user accounting after a full redemption. At the point
+where it is called, the user's own principal balance has already been burned.
+
+First, it clears any outgoing interest redirection:
+
+```solidity
+s_interestRedirectionAddresses[_user] =
+    address(0);
+```
+
+A user with no principal has no own balance whose interest can be redirected.
+The function emits an `InterestStreamRedirected` event with a zero destination
+to record that reset.
+
+The user index can be cleared only when the user also has no incoming redirected
+balance:
+
+```solidity
+if (s_redirectedBalances[_user] == 0) {
+    s_userIndexes[_user] = 0;
+    return true;
+}
+
+return false;
+```
+
+The two possible outcomes are:
+
+```text
+own principal = 0
+incoming redirected balance = 0
+    -> clear the user index
+    -> return true
+
+own principal = 0
+incoming redirected balance > 0
+    -> preserve the user index
+    -> return false
+```
+
+The index must remain initialized in the second case because the incoming
+redirected balance continues generating interest for the user.
+
+The boolean return value lets `redeem()` emit the correct index in the
+`Redeem` event:
+
+```text
+true  -> event index = 0
+false -> event index = current user index
 ```
 
 
@@ -2367,7 +2773,7 @@ current balance =
     ÷ user index
 ```
 
-The main update sequence is:
+The deposit update sequence is:
 
 ```text
 calculate accrued interest
@@ -2377,6 +2783,22 @@ mint accrued interest
 update the user index
         ↓
 perform the new deposit operation
+```
+
+The redemption sequence is:
+
+```text
+materialize accrued interest
+        ↓
+validate the collateral decrease
+        ↓
+update interest-redirection accounting
+        ↓
+burn the redeemed aTokens
+        ↓
+reset empty user data when possible
+        ↓
+ask LendingPool to return the underlying asset
 ```
 
 This design allows balances to grow continuously while only updating storage when a state-changing operation occurs.
