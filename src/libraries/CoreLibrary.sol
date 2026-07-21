@@ -34,6 +34,12 @@ library CoreLibrary {
     //            Errors          //
     ////////////////////////////////
     error CoreLibrary__ReserveAlreadyInitialized();
+    error CoreLibrary__InvalidAmountToDecrease();
+    error CoreLibrary__AmountsToSubtractDontMatch();
+    error CoreLibrary__InvalidVariableBorrowDecrease();
+    error CoreLibrary__ReserveAlreadyEnabled();
+    error CoreLibrary__ReserveAlreadyNeabledAsCollateral();
+
     ///////////////////////////////////
     //            Libraries          //
     ///////////////////////////////////
@@ -111,6 +117,12 @@ library CoreLibrary {
     ////////////////////////////////
     //      State Variables       //
     ////////////////////////////////
+    enum InterestRateMode {
+        NONE,
+        STABLE,
+        VARIABLE
+    }
+
     uint256 internal constant SECONDS_PER_YEAR = 365 days;
 
     //////////////////////////////////
@@ -151,6 +163,68 @@ library CoreLibrary {
         _self.isFreezed = false;
     }
 
+    /**
+     * @dev enables borrowing on a reserve
+     * @param _self the reserve object
+     * @param _stableBorrowRateEnabled true if the stable borrow rate must be enabled by default, false otherwise
+     *
+     */
+    function enableBorrowing(ReserveData storage _self, bool _stableBorrowRateEnabled) external {
+        if (_self.borrowingEnabled) {
+            revert CoreLibrary__ReserveAlreadyEnabled();
+        }
+
+        _self.borrowingEnabled = true;
+        _self.isStableBorrowRateEnabled = _stableBorrowRateEnabled;
+    }
+
+    /**
+     * @dev disables borrowing on a reserve
+     * @param _self the reserve object
+     *
+     */
+    function disableBorrowing(ReserveData storage _self) external {
+        _self.borrowingEnabled = false;
+    }
+
+    /**
+     * @dev enables a reserve to be used as collateral
+     * @param _self the reserve object
+     * @param _baseLTVasCollateral the loan to value of the asset when used as collateral
+     * @param _liquidationThreshold the threshold at which loans using this asset as collateral will be considered undercollateralized
+     * @param _liquidationBonus the bonus liquidators receive to liquidate this asset
+     *
+     */
+    function enableAsCollateral(
+        ReserveData storage _self,
+        uint256 _baseLTVasCollateral,
+        uint256 _liquidationThreshold,
+        uint256 _liquidationBonus
+    ) external {
+        if (_self.usageAsCollateralEnabled) {
+            revert CoreLibrary__ReserveAlreadyNeabledAsCollateral();
+        }
+
+        _self.usageAsCollateralEnabled = true;
+        _self.baseLTVasCollateral = _baseLTVasCollateral;
+        _self.liquidationThreshold = _liquidationThreshold;
+        _self.liquidationBonus = _liquidationBonus;
+
+        // This is a defensive fallback because lastLiquidityCumulativeIndex is set in the init function
+        if (_self.lastLiquidityCumulativeIndex == 0) {
+            _self.lastLiquidityCumulativeIndex = WadRayMath.ray();
+        }
+    }
+
+    /**
+     * @dev disables a reserve as collateral
+     * @param _self the reserve object
+     *
+     */
+    function disableAsCollateral(ReserveData storage _self) external {
+        _self.usageAsCollateralEnabled = false;
+    }
+
     //////////////////////////////////
     //       Internal Functions     //
     //////////////////////////////////
@@ -177,6 +251,166 @@ library CoreLibrary {
                 cumulatedVariableBorrowInterest.rayMul(_self.lastVariableBorrowCumulativeIndex);
         }
     }
+
+    /**
+     * @dev decreases the total borrows at a stable rate on a specific reserve and updates the
+     * average stable rate consequently
+     * @param _reserve the reserve object
+     * @param _amount the amount to substract to the total borrows stable
+     * @param _rate the rate at which the amount has been repaid
+     */
+    function decreaseTotalBorrowsStableAndUpdateAverageRate(
+        ReserveData storage _reserve,
+        uint256 _amount,
+        uint256 _rate
+    ) internal {
+        // This function removes stable-rate debt from a reserve
+        // and recalculates the reserve's average stable borrow rate
+
+        // Every stable-rate borrower can have a different rate:
+        // Alice: 1,000 DAI at 5%
+        // Bob: 500 DAI at 8%
+        // The reserve therefore stores a weighted avarage of all stable rates
+
+        // Formula when stable debt is removed:
+        //
+        // newAverageRate =
+        //     (
+        //         previousTotalDebt * previousAverageRate
+        //             - removedDebt * removedDebtRate
+        //     )
+        //     / remainingDebt;
+
+        // Example:
+        //
+        // Stable-rate positions:
+        // Alice: 1,000 DAI at 5%
+        // Bob:     500 DAI at 8%
+        //
+        // Total stable debt:
+        // 1,000 + 500 = 1,500 DAI
+        //
+        // Current average stable rate:
+        // (1,000 * 5% + 500 * 8%) / 1,500
+        // = (50 + 40) / 1,500
+        // = 6%
+        //
+        // Bob's 500 DAI position at 8% is removed.
+        //
+        // Remaining stable debt:
+        // 1,500 - 500 = 1,000 DAI
+        //
+        // Previous weighted interest:
+        // 1,500 * 6% = 90
+        //
+        // Removed weighted interest:
+        // 500 * 8% = 40
+        //
+        // New average stable rate:
+        // (90 - 40) / 1,000
+        // = 50 / 1,000
+        // = 5%
+        //
+        // The result is correct because only Alice's
+        // 1,000 DAI position at 5% remains.
+
+        // The function cannot remove more stable debt than the reserve currently contains
+        if (_reserve.totalBorrowsStable < _amount) {
+            revert CoreLibrary__InvalidAmountToDecrease();
+        }
+
+        // The previous total is needed to reconstruct the total weighted interest before removing the position
+        uint256 previousTotalBorrowsStable = _reserve.totalBorrowsStable;
+
+        // Decrease stable debt
+        // The removed amount is subtracted from the reserve's stable debt
+        _reserve.totalBorrowsStable = _reserve.totalBorrowsStable - _amount;
+
+        // Handle an empty stable-debt pool
+        // If no stable debt remains, there is no average stable rate.
+        // Returning also prevents division by zero later
+        if (_reserve.totalBorrowsStable == 0) {
+            _reserve.currentAverageStableBorrowRate = 0;
+            return;
+        }
+
+        // Calculate the interest weight associated with the debt being removed
+        // Removed amount x its stable rate
+        uint256 weightedLastBorrow = _amount.wadToRay().rayMul(_rate);
+
+        // Calculate the previous total weighted interest
+        // Reconstruct the combined interest weight of all stable debt before the removal:
+        // Previous total stable debt x previous average rate
+        uint256 weightedPreviousTotalBorrows =
+            previousTotalBorrowsStable.wadToRay().rayMul(_reserve.currentAverageStableBorrowRate);
+
+        // The removed position's weighted interest cannot be greater
+        // than the weighted interest of the complete reserve
+        if (weightedPreviousTotalBorrows < weightedLastBorrow) {
+            revert CoreLibrary__AmountsToSubtractDontMatch();
+        }
+
+        // Calculate the new average rate
+        // New average rate = remaining weighted interest / remaining stable debt
+        _reserve.currentAverageStableBorrowRate =
+            (weightedPreviousTotalBorrows - weightedLastBorrow).rayDiv(_reserve.totalBorrowsStable.wadToRay());
+    }
+
+    /**
+     * @dev decreases the total borrows at a variable rate
+     * @param _reserve the reserve object
+     * @param _amount the amount to substract to the total borrows variable
+     *
+     */
+    function decreaseTotalBorrowsVariable(ReserveData storage _reserve, uint256 _amount) internal {
+        // Prevent removing more variable debt than the reserve currently contains
+        if (_reserve.totalBorrowsVariable < _amount) {
+            revert CoreLibrary__InvalidVariableBorrowDecrease();
+        }
+        _reserve.totalBorrowsVariable -= _amount;
+    }
+
+    /**
+     * @dev increases the total borrows at a stable rate on a specific reserve and updates the
+     * average stable rate consequently
+     * @param _reserve the reserve object
+     * @param _amount the amount to add to the total borrows stable
+     * @param _rate the rate at which the amount has been borrowed
+     *
+     */
+    function increaseTotalBorrowsStableAndUpdateAverageRate(
+        ReserveData storage _reserve,
+        uint256 _amount,
+        uint256 _rate
+    ) internal {
+        uint256 previousTotalBorrowStable = _reserve.totalBorrowsStable;
+
+        // The new debt is added to the previous total
+        _reserve.totalBorrowsStable += _amount;
+
+        // Update the average stable rate
+        // The weighted contribution of the new borrow is calculated
+        uint256 weightedLastBorrow = _amount.wadToRay().rayMul(_rate);
+        // The previous weighted contribution is reconstructed:
+        uint256 weightedPreviousTotalBorrows =
+            previousTotalBorrowStable.wadToRay().rayMul(_reserve.currentAverageStableBorrowRate);
+
+        // Average rate = total weighted rate contridìbution / total stable debt
+        _reserve.currentAverageStableBorrowRate =
+            (weightedLastBorrow + weightedPreviousTotalBorrows).rayDiv(_reserve.totalBorrowsStable.wadToRay());
+    }
+
+    /**
+     * @dev increases the total borrows at a variable rate
+     * @param _reserve the reserve object
+     * @param _amount the amount to add to the total borrows variable
+     *
+     */
+    function increaseTotalBorrowsVariable(ReserveData storage _reserve, uint256 _amount) internal {
+        _reserve.totalBorrowsVariable += _amount;
+    }
+
+    //TODO cumulateToLiquidityIndex for flashloans
 
     //////////////////////////////////////////////////////
     //     Private & Internal View & Pure Functions     //
