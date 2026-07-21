@@ -33,6 +33,8 @@ It is a library used by `LendingPoolCore` to keep reserve and user accounting lo
 7. Calculating compounded interest
 8. Calculating total borrows
 9. Calculating a user's compounded borrow balance
+10. Configuring whether a reserve can be borrowed or used as collateral
+11. Updating stable and variable reserve borrow totals
 ```
 
 # ReserveData
@@ -1076,6 +1078,275 @@ _self.isFreezed = false;
 
 After this, the reserve is active and ready to be used by the protocol.
 
+# Reserve Configuration
+
+Reserve configuration is separate from a user's deposit. A first deposit can
+enable that user's `useAsCollateral` flag, but the reserve itself must first be
+configured as an eligible collateral asset. Likewise, borrowing must be enabled
+for a reserve before users can borrow that asset.
+
+These functions are `external` library functions intended to be called by a
+trusted protocol configuration contract through `LendingPoolCore`, not directly
+by end users.
+
+## `enableBorrowing`
+
+```solidity
+function enableBorrowing(
+    ReserveData storage _self,
+    bool _stableBorrowRateEnabled
+) external
+```
+
+Enables borrowing from the reserve and sets whether new stable-rate loans are
+permitted:
+
+```solidity
+_self.borrowingEnabled = true;
+_self.isStableBorrowRateEnabled = _stableBorrowRateEnabled;
+```
+
+It reverts with `CoreLibrary__ReserveAlreadyEnabled` if borrowing was already
+enabled. `LendingPool.borrow()` checks `borrowingEnabled` before it accepts a
+borrow.
+
+## `disableBorrowing`
+
+```solidity
+function disableBorrowing(ReserveData storage _self) external
+```
+
+Disables new borrows from the reserve:
+
+```solidity
+_self.borrowingEnabled = false;
+```
+
+It is an administrative configuration action. It does not erase existing debt
+or change `isStableBorrowRateEnabled`.
+
+## `enableAsCollateral`
+
+```solidity
+function enableAsCollateral(
+    ReserveData storage _self,
+    uint256 _baseLTVasCollateral,
+    uint256 _liquidationThreshold,
+    uint256 _liquidationBonus
+) external
+```
+
+Enables the reserve as eligible collateral and stores its risk parameters:
+
+```text
+baseLTVasCollateral   = borrowing power contributed by this asset
+liquidationThreshold  = threshold below which positions can be liquidated
+liquidationBonus      = collateral incentive for a liquidator
+```
+
+The function sets `usageAsCollateralEnabled` to `true`. It reverts if the
+reserve is already enabled as collateral, and ensures the liquidity index is at
+least one ray as a defensive fallback.
+
+For a deposit to count as collateral, both conditions must hold:
+
+```text
+reserve.usageAsCollateralEnabled == true
+user.useAsCollateral == true
+```
+
+## `disableAsCollateral`
+
+```solidity
+function disableAsCollateral(ReserveData storage _self) external
+```
+
+Disables the reserve globally as eligible collateral:
+
+```solidity
+_self.usageAsCollateralEnabled = false;
+```
+
+This is different from disabling one user's collateral flag. The latter is
+handled by `LendingPoolCore.setUserUseReserveAsCollateral`.
+
+# Borrow Total Accounting
+
+The following helpers maintain the reserve-wide debt totals when a user's
+borrow position is opened, increased, repaid, or changes rate mode. They are
+not called by a deposit.
+
+## `increaseTotalBorrowsStableAndUpdateAverageRate`
+
+```solidity
+function increaseTotalBorrowsStableAndUpdateAverageRate(
+    ReserveData storage _reserve,
+    uint256 _amount,
+    uint256 _rate
+) internal
+```
+
+Adds `_amount` to `totalBorrowsStable` and recalculates the weighted average
+stable borrow rate:
+
+```text
+newAverageRate =
+    (previousStableDebt * previousAverageRate + newDebt * newDebtRate)
+    / (previousStableDebt + newDebt)
+```
+
+This is necessary because individual stable borrowers can have different fixed
+rates.
+
+### Example
+
+Suppose the reserve already has `1,000 DAI` of stable debt at an average rate
+of `5%`, and a new user borrows `500 DAI` at `8%`.
+
+```text
+previous stable debt = 1,000 DAI at 5%
+new stable debt      =   500 DAI at 8%
+new total debt       = 1,500 DAI
+```
+
+The updated average is:
+
+```text
+(1,000 * 5% + 500 * 8%) / 1,500
+= (50 + 40) / 1,500
+= 6%
+```
+
+The reserve records `1,500 DAI` as stable debt and a `6%` average stable rate.
+
+### Why the Average Must Be Updated
+
+The reserve stores one `totalBorrowsStable` value, but each stable borrower can
+have a different user-specific `stableBorrowRate`. The protocol therefore needs
+one reserve-level rate that represents all stable positions together.
+
+That rate must be weighted by debt size so that the reserve-level interest is
+correct:
+
+```text
+total stable interest = sum(each user's stable debt * that user's stable rate)
+                       = totalBorrowsStable * currentAverageStableBorrowRate
+```
+
+For example, if Alice owes `1,000 DAI` at `5%` and Bob owes `500 DAI` at
+`8%`, the reserve has:
+
+```text
+total stable debt = 1,000 + 500 = 1,500 DAI
+
+total stable interest weight = (1,000 * 5%) + (500 * 8%)
+                             = 50 + 40
+                             = 90
+
+currentAverageStableBorrowRate = 90 / 1,500 = 6%
+```
+
+The single `6%` average preserves the same aggregate interest contribution as
+the two individual positions.
+
+`LendingPoolCore` supplies `currentAverageStableBorrowRate` to the interest-rate
+strategy when it calculates the reserve's rates. When a new stable loan is
+added, recalculating the weighted average includes that loan's rate and amount;
+otherwise the stored average would describe the old set of borrowers.
+
+
+
+## `decreaseTotalBorrowsStableAndUpdateAverageRate`
+
+```solidity
+function decreaseTotalBorrowsStableAndUpdateAverageRate(
+    ReserveData storage _reserve,
+    uint256 _amount,
+    uint256 _rate
+) internal
+```
+
+Removes stable debt and recalculates the weighted average stable rate of the
+remaining positions. It rejects an amount larger than the reserve's stable debt
+and rejects an inconsistent removed debt/rate combination. If no stable debt
+remains, it resets `currentAverageStableBorrowRate` to zero.
+
+### Why the Average Must Be Updated
+
+Removing a stable loan changes both the total stable debt and the mix of
+user-specific stable rates. The function subtracts the removed position's
+weighted contribution (`amount * rate`) before dividing by the remaining debt.
+
+Without this recalculation, the reserve would keep an average rate that still
+includes a loan that no longer exists. The interest-rate strategy would then
+receive inaccurate aggregate stable-debt information and could calculate the
+wrong reserve rates.
+
+### Example
+
+Suppose the reserve contains these stable positions:
+
+```text
+Alice = 1,000 DAI at 5%
+Bob   =   500 DAI at 8%
+```
+
+Before Bob repays, the reserve has `1,500 DAI` of stable debt and a weighted
+average stable rate of `6%`:
+
+```text
+(1,000 * 5% + 500 * 8%) / 1,500 = 6%
+```
+
+When Bob's `500 DAI` position at `8%` is removed:
+
+```text
+remaining debt = 1,500 - 500 = 1,000 DAI
+
+previous weighted rate = 1,500 * 6% = 90
+removed weighted rate  =   500 * 8% = 40
+
+new average rate = (90 - 40) / 1,000 = 5%
+```
+
+Only Alice's `1,000 DAI` position at `5%` remains, so the result is correct.
+
+## `increaseTotalBorrowsVariable`
+
+```solidity
+function increaseTotalBorrowsVariable(
+    ReserveData storage _reserve,
+    uint256 _amount
+) internal
+```
+
+Adds `_amount` to `totalBorrowsVariable`. No average-rate update is needed:
+variable-rate positions share the reserve's variable index and current variable
+rate.
+
+### Why It Does Not Update an Average Rate
+
+Stable borrowers can each have a different fixed rate, so the reserve stores
+and updates a weighted average stable rate when stable debt changes.
+
+Variable borrowers do not have separate fixed rates. Every variable position
+uses the reserve's `currentVariableBorrowRate` and grows through the same
+`lastVariableBorrowCumulativeIndex`. Therefore, removing variable debt changes
+only the aggregate `totalBorrowsVariable`; there is no per-user rate mix from
+which to calculate an average.
+
+## `decreaseTotalBorrowsVariable`
+
+```solidity
+function decreaseTotalBorrowsVariable(
+    ReserveData storage _reserve,
+    uint256 _amount
+) internal
+```
+
+Subtracts `_amount` from `totalBorrowsVariable`, reverting if the amount exceeds
+the tracked variable debt.
+
 # updateCumulativeIndexes
 
 `updateCumulativeIndexes` updates the liquidity cumulative index and the variable borrow cumulative index.
@@ -1636,4 +1907,3 @@ add 1 wei of debt.
 ```
 
 The reason is to avoid interest-free loans caused by rounding.
-
