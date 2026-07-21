@@ -44,6 +44,72 @@ contract CoreLibraryHarness {
         return reserve.getTotalBorrows();
     }
 
+    function increaseTotalBorrowsStableAndUpdateAverageRate(uint256 _amount, uint256 _rate) external {
+        reserve.increaseTotalBorrowsStableAndUpdateAverageRate(_amount, _rate);
+    }
+
+    function decreaseTotalBorrowsStableAndUpdateAverageRate(uint256 _amount, uint256 _rate) external {
+        reserve.decreaseTotalBorrowsStableAndUpdateAverageRate(_amount, _rate);
+    }
+
+    function increaseTotalBorrowsVariable(uint256 _amount) external {
+        reserve.increaseTotalBorrowsVariable(_amount);
+    }
+
+    function decreaseTotalBorrowsVariable(uint256 _amount) external {
+        reserve.decreaseTotalBorrowsVariable(_amount);
+    }
+
+    function enableBorrowing(bool _stableBorrowRateEnabled) external {
+        reserve.enableBorrowing(_stableBorrowRateEnabled);
+    }
+
+    function disableBorrowing() external {
+        reserve.disableBorrowing();
+    }
+
+    function enableAsCollateral(uint256 _baseLTVasCollateral, uint256 _liquidationThreshold, uint256 _liquidationBonus)
+        external
+    {
+        reserve.enableAsCollateral(_baseLTVasCollateral, _liquidationThreshold, _liquidationBonus);
+    }
+
+    function disableAsCollateral() external {
+        reserve.disableAsCollateral();
+    }
+
+    function getBorrowTotals()
+        external
+        view
+        returns (uint256 totalBorrowsStable, uint256 totalBorrowsVariable, uint256 currentAverageStableBorrowRate)
+    {
+        return (reserve.totalBorrowsStable, reserve.totalBorrowsVariable, reserve.currentAverageStableBorrowRate);
+    }
+
+    function getBorrowingConfiguration() external view returns (bool borrowingEnabled, bool isStableBorrowRateEnabled) {
+        return (reserve.borrowingEnabled, reserve.isStableBorrowRateEnabled);
+    }
+
+    function getCollateralConfiguration()
+        external
+        view
+        returns (
+            bool usageAsCollateralEnabled,
+            uint256 baseLTVasCollateral,
+            uint256 liquidationThreshold,
+            uint256 liquidationBonus,
+            uint256 lastLiquidityCumulativeIndex
+        )
+    {
+        return (
+            reserve.usageAsCollateralEnabled,
+            reserve.baseLTVasCollateral,
+            reserve.liquidationThreshold,
+            reserve.liquidationBonus,
+            reserve.lastLiquidityCumulativeIndex
+        );
+    }
+
     function getCompoundedBorrowBalance() external view returns (uint256) {
         return userReserve.getCompoundedBorrowBalance(reserve);
     }
@@ -656,5 +722,244 @@ contract CoreLibraryUnitTest is Test {
         uint256 compoundedBalance = harness.getCompoundedBorrowBalance();
 
         assertEq(compoundedBalance, 2);
+    }
+
+    ////////////////////////////////////////////////////////////////
+    //    increaseTotalBorrowsStableAndUpdateAverageRate         //
+    ////////////////////////////////////////////////////////////////
+    function testIncreaseTotalBorrowsStableSetsTotalAndRateForFirstStableBorrow() external {
+        uint256 amount = 1_000 ether;
+        uint256 rate = 5e25; // 5% in ray
+
+        harness.increaseTotalBorrowsStableAndUpdateAverageRate(amount, rate);
+
+        (uint256 totalBorrowsStable,, uint256 currentAverageStableBorrowRate) = harness.getBorrowTotals();
+
+        // With one stable borrower, the weighted average is that borrower's rate.
+        assertEq(totalBorrowsStable, amount);
+        assertEq(currentAverageStableBorrowRate, rate);
+    }
+
+    function testIncreaseTotalBorrowsStableCalculatesWeightedAverageRate() external {
+        CoreLibrary.ReserveData memory reserveData = _defaultReserveData();
+        reserveData.totalBorrowsStable = 1_000 ether; // 1,000 DAI
+        reserveData.currentAverageStableBorrowRate = 5e25; // Existing 1,000 DAI at 5%
+        harness.setReserveData(reserveData);
+
+        // A new 500 DAI stable borrow at 8% makes the reserve average:
+        uint256 newDebt = 500 ether;
+        uint256 newRate = 8e25;
+
+        harness.increaseTotalBorrowsStableAndUpdateAverageRate(newDebt, newRate);
+
+        (uint256 totalBorrowsStable,, uint256 currentAverageStableBorrowRate) = harness.getBorrowTotals();
+
+        // totalBorrowsStable = previous debt + new debt = 1,000 + 500 = 1,500 DAI
+        assertEq(totalBorrowsStable, 1_500 ether);
+
+        // newAverageRate = (previousStableDebt * previousAverageRate + newDebt * newDebtRate) / (previousStableDebt + newDebt)
+        // (1,000 * 5% + 500 * 8%) / 1,500 = 6%.
+        assertEq(currentAverageStableBorrowRate, 6e25);
+    }
+
+    ////////////////////////////////////////////////////////////////
+    //    decreaseTotalBorrowsStableAndUpdateAverageRate         //
+    ////////////////////////////////////////////////////////////////
+    function testDecreaseTotalBorrowsStableRemovesDebtAndRecalculatesAverageRate() external {
+        CoreLibrary.ReserveData memory reserveData = _defaultReserveData();
+        reserveData.totalBorrowsStable = 1_500 ether; // previous debt 1,500 DAI
+        reserveData.currentAverageStableBorrowRate = 6e25; // previous average rate 6%
+        harness.setReserveData(reserveData);
+
+        // Removing the 500 DAI position at 8% leaves 1,000 DAI at 5%.
+        uint256 removedDebt = 500 ether;
+        uint256 removedDebtRate = 8e25;
+        harness.decreaseTotalBorrowsStableAndUpdateAverageRate(removedDebt, removedDebtRate);
+
+        (uint256 totalBorrowsStable,, uint256 currentAverageStableBorrowRate) = harness.getBorrowTotals();
+
+        // totalBorrowStable = previous debt - removed debt = 1,500 - 500 = 1,000
+        assertEq(totalBorrowsStable, 1_000 ether);
+        // newAverageRate = ( previousTotalDebt * previousAverageRate - removedDebt * removedDebtRate) / remainingDebt;
+        // (1,500 * 6% - 500 * 8%) / 1,000 = 5%
+        assertEq(currentAverageStableBorrowRate, 5e25);
+    }
+
+    function testDecreaseTotalBorrowsStableResetsAverageRateWhenAllDebtIsRemoved() external {
+        CoreLibrary.ReserveData memory reserveData = _defaultReserveData();
+        reserveData.totalBorrowsStable = 500 ether; // previous debt 500 DAI
+        reserveData.currentAverageStableBorrowRate = 8e25; // previous average rate 8%
+        harness.setReserveData(reserveData);
+
+        uint256 removedDebt = 500 ether;
+        uint256 removedDebtRate = 8e25;
+        harness.decreaseTotalBorrowsStableAndUpdateAverageRate(removedDebt, removedDebtRate);
+
+        (uint256 totalBorrowsStable,, uint256 currentAverageStableBorrowRate) = harness.getBorrowTotals();
+
+        // totalBorrowsStable = previous debt - removed debt = 500 - 500 = 0
+        assertEq(totalBorrowsStable, 0);
+        assertEq(currentAverageStableBorrowRate, 0);
+    }
+
+    function testDecreaseTotalBorrowsStableRevertsWhenAmountExceedsStableDebt() external {
+        CoreLibrary.ReserveData memory reserveData = _defaultReserveData();
+        reserveData.totalBorrowsStable = 100 ether; // previous debt 100 DAI
+        harness.setReserveData(reserveData);
+
+        vm.expectRevert(CoreLibrary.CoreLibrary__InvalidAmountToDecrease.selector);
+        // We are removing 101 DAI so previous debt - removed debt < 0
+        harness.decreaseTotalBorrowsStableAndUpdateAverageRate(101 ether, 5e25);
+    }
+
+    function testDecreaseTotalBorrowsStableRevertsWhenRemovedRateDoesNotMatchReserveDebt() external {
+        CoreLibrary.ReserveData memory reserveData = _defaultReserveData();
+        reserveData.totalBorrowsStable = 1_500 ether;
+        reserveData.currentAverageStableBorrowRate = 6e25;
+        harness.setReserveData(reserveData);
+
+        // The reserve's total weighted rate is 1,500 * 6% = 90.
+        // Removing 500 DAI at 20% would remove a weight of 100, which is impossible.
+        vm.expectRevert(CoreLibrary.CoreLibrary__AmountsToSubtractDontMatch.selector);
+        harness.decreaseTotalBorrowsStableAndUpdateAverageRate(500 ether, 20e25);
+    }
+
+    ///////////////////////////////////////
+    //    increaseTotalBorrowsVariable   //
+    ///////////////////////////////////////
+    function testIncreaseTotalBorrowsVariableAddsToVariableDebtOnly() external {
+        CoreLibrary.ReserveData memory reserveData = _defaultReserveData();
+        reserveData.totalBorrowsStable = 100 ether;
+        reserveData.currentAverageStableBorrowRate = 5e25;
+        reserveData.totalBorrowsVariable = 200 ether; // previous variable debt 200 DAI
+        harness.setReserveData(reserveData);
+
+        // Adding a new variable debt of 50 DAI
+        harness.increaseTotalBorrowsVariable(50 ether);
+
+        (uint256 totalBorrowsStable, uint256 totalBorrowsVariable, uint256 currentAverageStableBorrowRate) =
+            harness.getBorrowTotals();
+
+        assertEq(totalBorrowsStable, 100 ether);
+        // total borrows variable = previous variable debt + new variable debt = 200 + 50 = 250
+        assertEq(totalBorrowsVariable, 250 ether);
+        assertEq(currentAverageStableBorrowRate, 5e25);
+    }
+
+    ///////////////////////////////////////
+    //    decreaseTotalBorrowsVariable   //
+    ///////////////////////////////////////
+
+    function testDecreaseTotalBorrowsVariableSubtractsVariableDebtOnly() external {
+        CoreLibrary.ReserveData memory reserveData = _defaultReserveData();
+        reserveData.totalBorrowsStable = 100 ether;
+        reserveData.currentAverageStableBorrowRate = 5e25;
+        reserveData.totalBorrowsVariable = 250 ether; // prevous variable debt 250 DAI
+        harness.setReserveData(reserveData);
+
+        // removed variable debt 50 DAI
+        harness.decreaseTotalBorrowsVariable(50 ether);
+
+        (uint256 totalBorrowsStable, uint256 totalBorrowsVariable, uint256 currentAverageStableBorrowRate) =
+            harness.getBorrowTotals();
+
+        assertEq(totalBorrowsStable, 100 ether);
+        // new variable debt = previsious variable debt - removed variable debt = 250 - 50 = 200
+        assertEq(totalBorrowsVariable, 200 ether);
+        //
+        assertEq(currentAverageStableBorrowRate, 5e25);
+    }
+
+    function testDecreaseTotalBorrowsVariableRevertsWhenAmountExceedsVariableDebt() external {
+        CoreLibrary.ReserveData memory reserveData = _defaultReserveData();
+        reserveData.totalBorrowsVariable = 100 ether; // previous variable debt 100 DAI
+        harness.setReserveData(reserveData);
+
+        vm.expectRevert(CoreLibrary.CoreLibrary__InvalidVariableBorrowDecrease.selector);
+        // Trying to remove 101 DAI but previous debt is 100 DAi so 101 - 100 = -1 --> reverts
+        harness.decreaseTotalBorrowsVariable(101 ether);
+    }
+
+    //////////////////////////
+    //    enableBorrowing   //
+    //////////////////////////
+    function testEnableBorrowingEnablesBorrowingAndConfiguresStableRateMode() external {
+        harness.enableBorrowing(true);
+
+        (bool borrowingEnabled, bool isStableBorrowRateEnabled) = harness.getBorrowingConfiguration();
+
+        assertTrue(borrowingEnabled);
+        assertTrue(isStableBorrowRateEnabled);
+    }
+
+    function testEnableBorrowingRevertsWhenBorrowingIsAlreadyEnabled() external {
+        harness.enableBorrowing(false);
+
+        vm.expectRevert(CoreLibrary.CoreLibrary__ReserveAlreadyEnabled.selector);
+        harness.enableBorrowing(true);
+    }
+
+    ///////////////////////////
+    //    disableBorrowing   //
+    ///////////////////////////
+    function testDisableBorrowingDisablesNewBorrowsWithoutChangingStableRateConfiguration() external {
+        harness.enableBorrowing(true);
+
+        harness.disableBorrowing();
+
+        (bool borrowingEnabled, bool isStableBorrowRateEnabled) = harness.getBorrowingConfiguration();
+
+        assertFalse(borrowingEnabled);
+        assertTrue(isStableBorrowRateEnabled);
+    }
+
+    /////////////////////////////
+    //    enableAsCollateral   //
+    /////////////////////////////
+    function testEnableAsCollateralStoresRiskParametersAndInitializesLiquidityIndex() external {
+        // Start from an all-zero reserve to exercise the defensive index initialization path.
+        uint256 baseLTVasCollateral = 75;
+        uint256 liquidationThreshold = 80;
+        uint256 liquidationBonus = 105;
+        harness.enableAsCollateral(baseLTVasCollateral, liquidationThreshold, liquidationBonus);
+
+        (
+            bool usageAsCollateralEnabled,
+            uint256 actualBaseLTVasCollateral,
+            uint256 actualLiquidationThreshold,
+            uint256 actualLiquidationBonus,
+            uint256 lastLiquidityCumulativeIndex
+        ) = harness.getCollateralConfiguration();
+
+        assertTrue(usageAsCollateralEnabled);
+        assertEq(actualBaseLTVasCollateral, baseLTVasCollateral);
+        assertEq(actualLiquidationThreshold, liquidationThreshold);
+        assertEq(actualLiquidationBonus, liquidationBonus);
+        assertEq(lastLiquidityCumulativeIndex, RAY);
+    }
+
+    function testEnableAsCollateralRevertsWhenCollateralIsAlreadyEnabled() external {
+        harness.enableAsCollateral(75, 80, 105);
+
+        vm.expectRevert(CoreLibrary.CoreLibrary__ReserveAlreadyNeabledAsCollateral.selector);
+        harness.enableAsCollateral(60, 70, 110);
+    }
+
+    function testDisableAsCollateralDisablesCollateralWithoutErasingRiskParameters() external {
+        harness.enableAsCollateral(75, 80, 105);
+
+        harness.disableAsCollateral();
+
+        (
+            bool usageAsCollateralEnabled,
+            uint256 baseLTVasCollateral,
+            uint256 liquidationThreshold,
+            uint256 liquidationBonus,
+        ) = harness.getCollateralConfiguration();
+
+        assertFalse(usageAsCollateralEnabled);
+        assertEq(baseLTVasCollateral, 75);
+        assertEq(liquidationThreshold, 80);
+        assertEq(liquidationBonus, 105);
     }
 }
