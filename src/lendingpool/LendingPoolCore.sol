@@ -32,8 +32,6 @@ import {CoreLibrary} from "src/libraries/CoreLibrary.sol";
 import {EthAddressLib} from "src/libraries/EthAddressLib.sol";
 import {AToken} from "src/tokenization/AToken.sol";
 
-//import {ERC20} from "openzeppelin-contracts/token/ERC20/ERC20.sol";
-
 /**
  * @title LendingPoolCore contract
  * @notice Holds the state of the lending pool and all the funds deposited
@@ -54,6 +52,7 @@ contract LendingPoolCore {
     error LendingPoolCore__ReserveListIsEmpty();
     error LendingPoolCore__ReserveToRemoveIsNotLastReserve();
     error LendingPoolCore__ReserveHasBorrows();
+    error LendingPoolCore__InvalidBorrowRateMode();
 
     ///////////////////////////////////
     //            Libraries          //
@@ -303,6 +302,43 @@ contract LendingPoolCore {
         }
     }
 
+    /**
+     * @dev updates the state of the core as a consequence of a borrow action.
+     * @param _reserve the address of the reserve on which the user is borrowing
+     * @param _user the address of the borrower
+     * @param _amountBorrowed the new amount borrowed
+     * @param _borrowFee the fee on the amount borrowed
+     * @param _rateMode the borrow rate mode (stable, variable)
+     * @return the new borrow rate for the user
+     *
+     */
+    function updateStateOnBorrow(
+        address _reserve,
+        address _user,
+        uint256 _amountBorrowed,
+        uint256 _borrowFee,
+        CoreLibrary.InterestRateMode _rateMode
+    ) external onlyLendingPool returns (uint256, uint256) {
+        // Getting the previous borrow data of the user
+        (uint256 principalBorrowBalance,, uint256 balanceIncrease) = getUserBorrowBalances(_reserve, _user);
+
+        // Update the global state of the reserve
+        _updateReserveStateOnBorrow(
+            _reserve, _user, principalBorrowBalance, balanceIncrease, _amountBorrowed, _rateMode
+        );
+
+        // Update the borrower's state
+        _updateUserStateOnBorrow(_reserve, _user, _amountBorrowed, balanceIncrease, _borrowFee, _rateMode);
+
+        // Recalculate reserve interest rates
+        _updateReserveInterestRatesAndTimestamp(_reserve, 0, _amountBorrowed);
+
+        // Return the results
+        // 1. The borrower's final state after the update
+        // 2. The interest accumulated before this borrow
+        return (_getUserCurrentBorrowRate(_reserve, _user), balanceIncrease);
+    }
+
     ////////////////////////////////
     //       Public Functions     //
     ////////////////////////////////
@@ -375,12 +411,210 @@ contract LendingPoolCore {
         s_isReserveAdded[_reserve] = true;
     }
 
+    /**
+     * @dev updates the state of a reserve as a consequence of a borrow action.
+     * @param _reserve the address of the reserve on which the user is borrowing
+     * @param _user the address of the borrower
+     * @param _principalBorrowBalance the previous borrow balance of the borrower before the action
+     * @param _balanceIncrease the accrued interest of the user on the previous borrowed amount
+     * @param _amountBorrowed the new amount borrowed
+     * @param _rateMode the borrow rate mode (stable, variable)
+     *
+     */
+    function _updateReserveStateOnBorrow(
+        address _reserve,
+        address _user,
+        uint256 _principalBorrowBalance,
+        uint256 _balanceIncrease,
+        uint256 _amountBorrowed,
+        CoreLibrary.InterestRateMode _rateMode
+    ) internal {
+        // The protocol updates the reserve's indexes to include all interest accrued since the reserve's previous update.
+        // This updates:
+        // - the liquidity index, used to calculate deposit interest
+        // - the variable borrow index, used to claculate variable debt
+        s_reserves[_reserve].updateCumulativeIndexes();
+
+        // Increasing reserve total borrows to account for the new borrow balance of the user
+        // NOTE: Depending on the previous borrow mode, the borrow might need to be switched from variable to stable or viceversa
+        // Every reserve stores debt in two separate totals:
+        // - totalBorrowsStable
+        // - totalBorrowsVariable
+        // This helper adds:
+        // accrued interest + newly borrowed amount
+        // tot the appropriate total
+        _updateReserveTotalBorrowsByRateMode(
+            _reserve, _user, _principalBorrowBalance, _balanceIncrease, _amountBorrowed, _rateMode
+        );
+    }
+
+    /**
+     * @dev Updates the reserve's stable and variable borrow totals
+     * after a borrow action.
+     * @param _reserve The reserve from which the user is borrowing.
+     * @param _user The borrower.
+     * @param _principalBalance The user's previous stored principal.
+     * @param _balanceIncrease The interest accrued on the previous principal.
+     * @param _amountBorrowed The newly borrowed amount.
+     * @param _newBorrowRateMode The rate mode selected for the updated debt.
+     */
+    function _updateReserveTotalBorrowsByRateMode(
+        address _reserve,
+        address _user,
+        uint256 _principalBalance,
+        uint256 _balanceIncrease,
+        uint256 _amountBorrowed,
+        CoreLibrary.InterestRateMode _newBorrowRateMode
+    ) internal {
+        // This function updates the reserve's total stable and variable debt when a user borrows.
+        // Its main strategy is:
+        //   1. Remove the user's previous principal from its old rate mode.
+        //   2. Add accrued interest and the new borrow.
+        //   3. Insert and complete updated principal into the selected rate mode.
+
+        // 1. Determine the previous rate mode
+
+        // The user can previously be: NONE, STABLE, VARIABLE
+
+        // The existing principal is already included in either:
+        // reserve.totalBorrowsStable or reserve.totalBorrowsVariable
+        CoreLibrary.InterestRateMode previousRateMode = getUserCurrentBorrowRateMode(_reserve, _user);
+
+        // 2. Load the reserve
+        // This reserve contains the global debt accounting for the asset:
+        // - Total stable debt
+        // - Total variable debt
+        // - Avarage stable borrow rate
+        // - Current stable borrow rate
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+
+        // 3. Remove the previous principal
+
+        if (previousRateMode == CoreLibrary.InterestRateMode.STABLE) {
+            // Previous mode is stable
+
+            CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
+            // The user's principal is removed from the reserve's total stable debt.
+            // The reserve's average stable borrow rate must also be recalculated
+            // because the removed debt had the user's previous stable rate.
+            reserve.decreaseTotalBorrowsStableAndUpdateAverageRate(_principalBalance, user.stableBorrowRate);
+        } else if (previousRateMode == CoreLibrary.InterestRateMode.VARIABLE) {
+            // Previous mode is variable
+
+            // The principal is removed from the variable debt total.
+            // Variable debt doesn't require updating an average rate because every variable
+            // borrower follows the reseve's variable borrow index.
+            reserve.decreaseTotalBorrowsVariable(_principalBalance);
+        }
+
+        // First borrow
+        // If the previous mode is NONE, nothing is removed because the user has no existing debt.
+
+        // 4. Calculate the new principal
+
+        // The new principal includes: previous stored principal + accrued interest + new borrowed amount
+        uint256 newPrincipalAmount = _principalBalance + _balanceIncrease + _amountBorrowed;
+
+        // 5. Add the complete debt to the new rate mdoe
+        if (_newBorrowRateMode == CoreLibrary.InterestRateMode.STABLE) {
+            // New mode is stable
+
+            // The complete updated principal is added to the stable debt total using the
+            // reserve's current stable rate
+
+            // The average stable borrow rate is recalculated
+            reserve.increaseTotalBorrowsStableAndUpdateAverageRate(newPrincipalAmount, reserve.currentStableBorrowRate);
+        } else if (_newBorrowRateMode == CoreLibrary.InterestRateMode.VARIABLE) {
+            // New mode is variable
+
+            // The complete updated principal is added to the variable debt total
+            reserve.increaseTotalBorrowsVariable(newPrincipalAmount);
+        } else {
+            // Invalid mode
+
+            // NONE is not valid for a new borrow
+            revert LendingPoolCore__InvalidBorrowRateMode();
+        }
+    }
+
+    /**
+     * @dev updates the state of a user as a consequence of a borrow action.
+     * @param _reserve the address of the reserve on which the user is borrowing
+     * @param _user the address of the borrower
+     * @param _amountBorrowed the amount borrowed
+     * @param _balanceIncrease the accrued interest of the user on the previous borrowed amount
+     * @param _fee the origination fee charged for the borrow
+     * @param _rateMode the borrow rate mode (stable, variable)
+     *
+     */
+    function _updateUserStateOnBorrow(
+        address _reserve,
+        address _user,
+        uint256 _amountBorrowed,
+        uint256 _balanceIncrease,
+        uint256 _fee,
+        CoreLibrary.InterestRateMode _rateMode
+    ) internal {
+        // Load the reserve and user
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
+
+        if (_rateMode == CoreLibrary.InterestRateMode.STABLE) {
+            // Stable mode:
+            // - the current reserve stable rate is stored in the user's position
+            user.stableBorrowRate = reserve.currentStableBorrowRate;
+
+            // - the variable borrow index is reset
+            user.lastVariableBorrowCumulativeIndex = 0;
+        } else if (_rateMode == CoreLibrary.InterestRateMode.VARIABLE) {
+            // variable mode
+            // - the stable rate is reset
+            user.stableBorrowRate = 0;
+            // -the current variable borrow index is stored as the user's starting index
+            user.lastVariableBorrowCumulativeIndex = reserve.lastVariableBorrowCumulativeIndex;
+        } else {
+            revert LendingPoolCore__InvalidBorrowRateMode();
+        }
+
+        // Update the principal
+        // New principal = previous principal + accrued interest + newly borrowed amount
+        user.principalBorrowBalance += _amountBorrowed + _balanceIncrease;
+
+        // Update the origination fee
+        // TODO what is origination fee? Explain it in the docs
+        user.originationFee += _fee;
+
+        // Update the timestamp
+        user.lastUpdateTimestamp = uint40(block.timestamp);
+    }
+
     /////////////////////////////////
     //       Private Functions     //
     /////////////////////////////////
     //////////////////////////////////////////////////////
     //     Private & Internal View & Pure Functions     //
     //////////////////////////////////////////////////////
+    /**
+     * @dev gets the current borrow rate of the user
+     * @param _reserve the address of the reserve for which the information is needed
+     * @param _user the address of the user for which the information is needed
+     * @return the borrow rate for the user,
+     *
+     */
+    function _getUserCurrentBorrowRate(address _reserve, address _user) internal view returns (uint256) {
+        // Read the user's rate mode (NONE, STABLE, VARIABLE)
+        CoreLibrary.InterestRateMode rateMode = getUserCurrentBorrowRateMode(_reserve, _user);
+
+        // No debt
+        if (rateMode == CoreLibrary.InterestRateMode.NONE) {
+            return 0;
+        }
+
+        return rateMode == CoreLibrary.InterestRateMode.STABLE
+            ? s_usersReserveData[_user][_reserve].stableBorrowRate
+            : s_reserves[_reserve].currentVariableBorrowRate;
+    }
+
     //////////////////////////////////////////////////////
     //      External & Public View & Pure Functions     //
     //////////////////////////////////////////////////////
@@ -532,5 +766,125 @@ contract LendingPoolCore {
     function isUserUseReserveAsCollateralEnabled(address _reserve, address _user) external view returns (bool) {
         CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
         return user.useAsCollateral;
+    }
+
+    /**
+     * @dev returns true if the reserve is enabled for borrowing
+     * @param _reserve the reserve address
+     * @return true if the reserve is enabled for borrowing, false otherwise
+     *
+     */
+    function isReserveBorrowingEnabled(address _reserve) external view returns (bool) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        return reserve.borrowingEnabled;
+    }
+
+    /**
+     * @dev returns the decimals of the reserve
+     * @param _reserve the reserve address
+     * @return the reserve decimals
+     *
+     */
+    function getReserveDecimals(address _reserve) external view returns (uint256) {
+        return s_reserves[_reserve].decimals;
+    }
+
+    /**
+     * @dev calculates and returns the borrow balances of the user
+     * @param _reserve the address of the reserve
+     * @param _user the address of the user
+     * @return the principal borrow balance, the compounded balance and the balance increase since the last borrow/repay/swap/rebalance
+     *
+     */
+    function getUserBorrowBalances(address _reserve, address _user) public view returns (uint256, uint256, uint256) {
+        // Read user's reserve data
+        CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
+
+        // Read the stored principal
+        // The principal is the debt stored during the user's last borro-related action.
+        // It includes interest that had already been materialized during previous actions, but not
+        // interest accrued since the last update
+        uint256 principal = user.principalBorrowBalance;
+
+        // Handles users without debt
+        if (principal == 0) {
+            return (0, 0, 0);
+        }
+
+        // Calculate the current debt
+        // current debt = stored principal + accrued interest
+        // This is a view calculation, it doesn't updated storage
+        uint256 compoundedBalance = CoreLibrary.getCompoundedBorrowBalance(user, s_reserves[_reserve]);
+
+        // Calculate the balance increase = compoundedBalance - principal
+
+        // Example
+        // principal: 1,000 DAI
+        // compounded balance: 1,020 DAI
+        // balance increase: 20 DAI
+        return (principal, compoundedBalance, compoundedBalance - principal);
+    }
+
+    /**
+     * @notice Returns the user's current borrow rate mode for a reserve.
+     * @dev Returns `NONE` if the user has no debt, `STABLE` if the user
+     * has a stable borrow rate, and `VARIABLE` otherwise.
+     * @param _reserve The address of the borrowed reserve.
+     * @param _user The address of the borrower.
+     * @return rateMode The user's current borrow rate mode.
+     */
+    function getUserCurrentBorrowRateMode(address _reserve, address _user)
+        public
+        view
+        returns (CoreLibrary.InterestRateMode)
+    {
+        CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
+
+        if (user.principalBorrowBalance == 0) {
+            return CoreLibrary.InterestRateMode.NONE;
+        }
+
+        return user.stableBorrowRate > 0 ? CoreLibrary.InterestRateMode.STABLE : CoreLibrary.InterestRateMode.VARIABLE;
+    }
+
+    /**
+     * @dev checks if a user is allowed to borrow at a stable rate
+     * @param _reserve the reserve address
+     * @param _user the user
+     * @param _amount the amount the the user wants to borrow
+     * @return true if the user is allowed to borrow at a stable rate, false otherwise
+     *
+     */
+    function isUserAllowedToBorrowAtStable(address _reserve, address _user, uint256 _amount)
+        external
+        view
+        returns (bool)
+    {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
+
+        // Stable borrowing must be enabled
+        if (!reserve.isStableBorrowRateEnabled) {
+            return false;
+        }
+
+        // Borrowing is allowed if:
+        // 1. The user is not using this reserve as collateral
+        // 2. The reserve cannot be used as collateral
+        // 3. The amount being borrowed is greater than the user's balance of the same asset.
+
+        // Stable borrowing is rejected only when all three are true:
+        // - The user uses the reserve as collateral.
+        // - The reserve is enabled as collateral
+        // - The requested borrow is less than or equal to the user's balance of that asser
+
+        // Example
+        // Alice deposited 1,000 DAI and enabled is as collateral
+        // If she attempts to borrow 500 DAI at a stable rate:
+        // 500 DAI <= 1,000 DAI
+        // The function returns false because Alice would be borrowing the same asset that she is using as collateral.
+        // If Alice instead borrows another asset, such as USDC, her DAI deposit is irrelevant to this specific check.
+        return !user.useAsCollateral || !reserve.usageAsCollateralEnabled
+            || _amount > getUserUnderlyingAssetBalance(_reserve, _user);
     }
 }
