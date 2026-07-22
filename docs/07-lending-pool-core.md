@@ -108,6 +108,7 @@ Only the current `LendingPool` registered in the addresses provider can call ope
 ```text
 updateStateOnDeposit()
 updateStateOnRedeem()
+updateStateOnBorrow()
 transferToReserve()
 transferToUser()
 setUserUseReserveAsCollateral()
@@ -231,7 +232,7 @@ The constructor stores the `LendingPoolAddressesProvider`.
 
 The active LendingPool and LendingPoolConfigurator addresses are later resolved through this provider.
 
-The current implementation also stores `i_lendingPoolAddress`, although the access-control modifier uses the address provider dynamically instead.
+The access-control modifiers resolve the current addresses dynamically through the provider. This lets the configured LendingPool and configurator be updated without redeploying the core.
 
 # Deposit State Update
 
@@ -508,6 +509,203 @@ LendingPoolCore__EthTransferFailed(_user, _amount)
 ```
 
 The fixed gas stipend keeps the ETH transfer bounded while still allowing the receiver more than Solidity's old `transfer()` stipend.
+
+# Borrow State Update
+
+## `updateStateOnBorrow`
+
+```solidity
+function updateStateOnBorrow(
+    address _reserve,
+    address _user,
+    uint256 _amountBorrowed,
+    uint256 _borrowFee,
+    CoreLibrary.InterestRateMode _rateMode
+) external onlyLendingPool returns (uint256, uint256)
+```
+
+This is the core accounting entry point for an accepted borrow. It updates debt accounting before `LendingPool` transfers the underlying asset to the borrower with `transferToUser()`.
+
+It assumes `LendingPool` has already validated the action. In particular, it does not itself verify reserve status, user collateral capacity, available liquidity, or whether stable borrowing is permitted.
+
+The operation is performed in this order:
+
+```text
+1. Calculate the user's stored principal and interest accrued since their last debt update.
+2. Update reserve indexes and global stable/variable debt totals.
+3. Update the user's debt position, selected rate data, fee, and timestamp.
+4. Recalculate reserve interest rates for the liquidity removed by the borrow.
+```
+
+The return values are:
+
+```text
+1. the borrower's current rate after the update
+2. interest accrued on their previous debt before this borrow (`balanceIncrease`)
+```
+
+For a stable loan, the returned rate is the stable rate recorded on the user. For a variable loan, it is the reserve's current variable borrow rate.
+
+## `_updateReserveStateOnBorrow`
+
+```solidity
+function _updateReserveStateOnBorrow(...) internal
+```
+
+This helper applies the reserve-side effects of a borrow.
+
+First, `updateCumulativeIndexes()` materializes interest accrued since the reserve's previous update into the liquidity and variable-borrow indexes. It then delegates to `_updateReserveTotalBorrowsByRateMode()` to reflect the borrower's complete updated debt in the reserve totals.
+
+It deliberately operates before rates are recalculated: previously accrued interest must use the rates and indexes that existed before the new liquidity is removed.
+
+## `_updateReserveTotalBorrowsByRateMode`
+
+```solidity
+function _updateReserveTotalBorrowsByRateMode(...) internal
+```
+
+Reserves track stable and variable debt separately. This helper preserves those totals when a user takes an additional loan or changes rate mode.
+
+It derives the user's previous mode from their stored position, removes their old principal from that mode's aggregate, and computes:
+
+```text
+updated user principal = previous principal + accrued interest + newly borrowed amount
+```
+
+It then adds the entire updated principal to the newly selected mode:
+
+```text
+stable mode:   updates total stable borrows and the weighted average stable rate
+variable mode: updates total variable borrows
+```
+
+This remove-then-add approach handles both an additional borrow at the same rate mode and a stable/variable mode switch. The net increase in total reserve debt is always the accrued interest plus the newly borrowed amount. `NONE` is invalid for a new borrow and reverts with `LendingPoolCore__InvalidBorrowRateMode`.
+
+### Why remove the old principal first?
+
+Before this call, the user's stored `principalBorrowBalance` is already included in exactly one reserve total. Adding the updated debt without first removing that old principal would count the same debt twice.
+
+The function therefore follows this invariant:
+
+```text
+old aggregate debt
+- user's old principal in the old mode
++ user's complete updated principal in the selected new mode
+```
+
+Only the interest that accrued since the user's previous update and the newly borrowed amount increase the sum of the two reserve debt totals.
+
+### Example 1: First borrow (`NONE` → `VARIABLE`)
+
+Assume the reserve starts with 10,000 DAI of stable debt and 5,000 DAI of variable debt. Alice has no existing DAI debt, so her previous mode is `NONE`.
+
+```text
+Alice's previous principal =     0 DAI
+accrued interest           =     0 DAI
+new borrow                 =   500 DAI
+updated principal          =   500 DAI
+```
+
+There is no previous principal to remove. Since Alice chooses variable mode, the function adds her full 500 DAI position to `totalBorrowsVariable`:
+
+```text
+totalBorrowsStable:   10,000 DAI  -> 10,000 DAI
+totalBorrowsVariable:  5,000 DAI  ->  5,500 DAI
+```
+
+### Example 2: Additional variable borrow (`VARIABLE` → `VARIABLE`)
+
+Assume Alice already has 1,000 DAI of variable debt. Since her last debt update, 20 DAI of interest accrued; she now borrows another 500 DAI at variable rate. The reserve has 5,000 DAI of variable debt before the operation, including Alice's stored 1,000 DAI principal.
+
+```text
+previous principal = 1,000 DAI
+accrued interest   =    20 DAI
+new borrow         =   500 DAI
+updated principal  = 1,520 DAI
+```
+
+The function removes the 1,000 DAI old principal, then adds the 1,520 DAI updated position back to the variable aggregate:
+
+```text
+totalBorrowsVariable = 5,000 - 1,000 + 1,520
+                     = 5,520 DAI
+```
+
+The aggregate increases by 520 DAI, exactly equal to `20 DAI` accrued interest plus `500 DAI` newly borrowed.
+
+### Example 3: Switch from variable to stable (`VARIABLE` → `STABLE`)
+
+Using the same user debt values, assume the reserve begins with 10,000 DAI of stable debt and 5,000 DAI of variable debt.
+
+The old 1,000 DAI principal belongs to the variable aggregate, so it is removed there. The complete updated 1,520 DAI position is then added to the stable aggregate:
+
+```text
+totalBorrowsVariable: 5,000 - 1,000 =  4,000 DAI
+totalBorrowsStable:  10,000 + 1,520 = 11,520 DAI
+```
+
+The user's debt has changed buckets, but total reserve debt still rises by only 520 DAI. Adding stable debt also recalculates the reserve's weighted average stable borrow rate, using the reserve's current stable rate for this updated position.
+
+### Example 4: Switch from stable to variable (`STABLE` → `VARIABLE`)
+
+Assume Alice has 1,000 DAI of stable debt, 20 DAI has accrued, and she borrows another 500 DAI in variable mode. The reserve starts with 10,000 DAI of stable debt and 5,000 DAI of variable debt.
+
+```text
+totalBorrowsStable:   10,000 - 1,000 =  9,000 DAI
+totalBorrowsVariable:  5,000 + 1,520 =  6,520 DAI
+```
+
+Removing stable debt recalculates the weighted average stable borrow rate because Alice's old stable rate is leaving that pool. The variable total needs no average-rate update: variable debt is valued through the common variable borrow index.
+
+### Rate-mode summary
+
+```text
+previous mode   selected mode   old principal removed from   updated principal added to
+NONE            STABLE          none                         totalBorrowsStable
+NONE            VARIABLE        none                         totalBorrowsVariable
+STABLE          STABLE          totalBorrowsStable           totalBorrowsStable
+STABLE          VARIABLE        totalBorrowsStable           totalBorrowsVariable
+VARIABLE        STABLE          totalBorrowsVariable         totalBorrowsStable
+VARIABLE        VARIABLE        totalBorrowsVariable         totalBorrowsVariable
+```
+
+## `_updateUserStateOnBorrow`
+
+```solidity
+function _updateUserStateOnBorrow(...) internal
+```
+
+This helper writes the borrower's reserve-specific debt state.
+
+For a stable loan, it stores the reserve's current stable rate and clears the variable-borrow-index checkpoint. For a variable loan, it clears the user's stable rate and stores the reserve's current variable-borrow index as the new checkpoint.
+
+In both cases it:
+
+```text
+increments principalBorrowBalance by newly borrowed amount + accrued interest
+increments originationFee by the supplied borrow fee
+sets lastUpdateTimestamp to the current block timestamp
+```
+
+The accrued interest is added to principal because it is being materialized at this borrow action; it is no longer merely a view-time calculation.
+
+## `_getUserCurrentBorrowRate`
+
+```solidity
+function _getUserCurrentBorrowRate(
+    address _reserve,
+    address _user
+) internal view returns (uint256)
+```
+
+This helper returns zero when the user has no debt. Otherwise it returns the rate relevant to the user's current mode:
+
+```text
+stable debt:   user's stored stableBorrowRate
+variable debt: reserve.currentVariableBorrowRate
+```
+
+Variable borrowers do not store an individual variable rate because their debt follows the reserve-wide variable rate and borrow index.
 
 # Reserve Initialization
 
@@ -957,3 +1155,105 @@ s_usersReserveData[_user][_reserve].useAsCollateral
 This is user-level state.
 
 It answers whether that user's balance in the reserve is currently marked as collateral. For the balance to actually count as collateral in account calculations, the reserve itself must also have collateral usage enabled.
+
+## `isReserveBorrowingEnabled`
+
+```solidity
+function isReserveBorrowingEnabled(
+    address _reserve
+) external view returns (bool)
+```
+
+Returns the reserve-level `borrowingEnabled` configuration flag. `LendingPool.borrow()` uses this getter to reject borrowing from reserves whose borrowing feature is disabled.
+
+This flag is distinct from whether the reserve is active or frozen, and it does not prove that a particular user can borrow: the user-facing flow performs those additional checks separately.
+
+## `getReserveDecimals`
+
+```solidity
+function getReserveDecimals(
+    address _reserve
+) external view returns (uint256)
+```
+
+Returns the number of decimal places configured when the reserve was initialized. Consumers use it to normalize the reserve's raw token amounts for calculations and presentation.
+
+# Reading User Borrow Data
+
+## `getUserBorrowBalances`
+
+```solidity
+function getUserBorrowBalances(
+    address _reserve,
+    address _user
+) public view returns (
+    uint256 principalBorrowBalance,
+    uint256 compoundedBorrowBalance,
+    uint256 balanceIncrease
+)
+```
+
+Returns a three-part view of the user's debt:
+
+```text
+principalBorrowBalance:  debt recorded at the user's last debt update
+compoundedBorrowBalance: current debt after interest accrued until now
+balanceIncrease:         interest accrued since that update
+```
+
+For a user without debt, all three values are zero. Otherwise, the function uses `CoreLibrary.getCompoundedBorrowBalance()` and calculates:
+
+```text
+balanceIncrease = compoundedBorrowBalance - principalBorrowBalance
+```
+
+This getter does not write state. `updateStateOnBorrow()` uses it to materialize the returned `balanceIncrease` into both the reserve totals and the user's stored principal before adding a new loan.
+
+## `getUserCurrentBorrowRateMode`
+
+```solidity
+function getUserCurrentBorrowRateMode(
+    address _reserve,
+    address _user
+) public view returns (CoreLibrary.InterestRateMode)
+```
+
+Returns the mode inferred from the user's stored debt data:
+
+```text
+principalBorrowBalance == 0  -> NONE
+stableBorrowRate > 0         -> STABLE
+otherwise                    -> VARIABLE
+```
+
+The function does not store a separate rate-mode field. A nonzero stable rate identifies stable debt; an outstanding debt with a zero stable rate is variable debt.
+
+## `isUserAllowedToBorrowAtStable`
+
+```solidity
+function isUserAllowedToBorrowAtStable(
+    address _reserve,
+    address _user,
+    uint256 _amount
+) external view returns (bool)
+```
+
+Returns whether the core's stable-rate eligibility rule passes for this reserve, user, and amount.
+
+First, stable borrowing must be enabled for the reserve:
+
+```solidity
+reserve.isStableBorrowRateEnabled
+```
+
+If it is enabled, the function rejects only the following combination:
+
+```text
+the user has this reserve enabled as collateral
+AND the reserve type supports collateral
+AND the requested stable borrow is less than or equal to the user's current deposit of that same asset
+```
+
+Equivalently, a same-asset stable borrow is allowed only when its amount exceeds that user's current underlying deposit balance. The balance is read through the aToken, so accrued deposit interest is included.
+
+This is not the complete stable-borrow validation. `LendingPool` also checks the stable borrowing cap relative to available liquidity, alongside the general borrow validations such as collateral capacity and available liquidity.
