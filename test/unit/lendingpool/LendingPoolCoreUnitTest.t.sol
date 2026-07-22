@@ -32,6 +32,10 @@ contract LendingPoolCoreHarness is LendingPoolCore {
         s_reserves[_reserve].totalBorrowsVariable = _variableBorrows;
     }
 
+    function setReserveCurrentAverageStableBorrowRate(address _reserve, uint256 _averageStableBorrowRate) external {
+        s_reserves[_reserve].currentAverageStableBorrowRate = _averageStableBorrowRate;
+    }
+
     function setUserReserveData(address _user, address _reserve, CoreLibrary.UserReserveData memory _data) external {
         s_usersReserveData[_user][_reserve] = _data;
     }
@@ -70,6 +74,19 @@ contract LendingPoolCoreHarness is LendingPoolCore {
         uint256 _liquidityTaken
     ) external {
         _updateReserveInterestRatesAndTimestamp(_reserve, _liquidityAdded, _liquidityTaken);
+    }
+
+    function exposedUpdateReserveTotalBorrowsByRateMode(
+        address _reserve,
+        address _user,
+        uint256 _principalBalance,
+        uint256 _balanceIncrease,
+        uint256 _amountBorrowed,
+        CoreLibrary.InterestRateMode _newBorrowRateMode
+    ) external {
+        _updateReserveTotalBorrowsByRateMode(
+            _reserve, _user, _principalBalance, _balanceIncrease, _amountBorrowed, _newBorrowRateMode
+        );
     }
 
     function exposedAddReserveToList(address _reserve) external {
@@ -997,5 +1014,423 @@ contract LendingPoolCoreUnitTest is Test {
     ////////////////////////////////
     function testGetReserveNormalizedIncomeStartsAtOneRay() external withInitReserve(address(token)) {
         assertEq(core.getReserveNormalizedIncome(address(token)), RAY);
+    }
+
+    //////////////////////////////////////////////////
+    //  _updateReserveTotalBorrowsByRateMode        //
+    //////////////////////////////////////////////////
+
+    // Scenario: a user with no existing debt takes their first loan at a stable rate
+    // (`NONE` -> `STABLE`)
+    //
+    // We verify that the new debt is added only to the stable aggregate, while the
+    // existing variable aggregate is untouched. Because both the existing stable debt
+    // and the new stable loan use 5%, their weighted average stable rate must stay 5%.
+    function testUpdateReserveTotalBorrowsByRateModeAddsFirstStableBorrow() external {
+        // Existing stable debt is 1,000 DAI at a 5% average stable rate.
+        // Variable debt 500 DAI.
+        core.setReserveBorrows(address(token), 1_000 ether, 500 ether);
+        core.setReserveCurrentAverageStableBorrowRate(address(token), 5e25);
+        core.setReserveRates(address(token), 0, 5e25, 0);
+
+        // Arguments after the reserve and user represent:
+        // - 0: the user's previous principal borrow balance;
+        // - 0: interest accrued since the user's previous debt update;
+        // - 500 DAI: the newly borrowed amount;
+        // - STABLE: the rate mode selected for the resulting debt.
+        //
+        // Therefore, the helper calculates an updated principal of 0 + 0 + 500 = 500 DAI.
+        core.exposedUpdateReserveTotalBorrowsByRateMode(
+            address(token), user, 0, 0, 500 ether, CoreLibrary.InterestRateMode.STABLE
+        );
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+
+        // Assert that a first stable borrow is added entirely to the stable-debt bucket.
+        // No old debt is removed because the user previously had no debt. The updated
+        // principal is 0 + 0 + 500 = 500 DAI, so stable debt becomes 1,000 + 500 = 1,500 DAI.
+        assertEq(reserve.totalBorrowsStable, 1_500 ether);
+
+        // Assert that adding the stable position updates the weighted average correctly.
+        // The new position and the existing stable debt both use 5%, so their weighted
+        // average remains 5%.
+        assertEq(reserve.currentAverageStableBorrowRate, 5e25);
+
+        // Assert that a stable borrow does not accidentally change the separate variable-debt bucket.
+        // The existing variable aggregate must remain 500 DAI.
+        assertEq(reserve.totalBorrowsVariable, 500 ether);
+    }
+
+    // Scenario: a user with no existing debt takes their first loan at a variable rate.
+    // (`NONE` -> `VARIABLE`)
+    //
+    // We verify that the new debt is added only to the variable aggregate, while the
+    // existing stable aggregate is untouched. Variable debt has no user-specific rate
+    // contribution to the reserve's average stable borrow rate.
+    function testUpdateReserveTotalBorrowsByRateModeAddsFirstVariableBorrow() external {
+        core.setReserveBorrows(address(token), 1_000 ether, 500 ether);
+
+        // Arguments after the reserve and user represent:
+        // - 0: the user's previous principal borrow balance;
+        // - 0: interest accrued since the user's previous debt update;
+        // - 500 DAI: the newly borrowed amount;
+        // - VARIABLE: the rate mode selected for the resulting debt.
+        //
+        // Therefore, the helper calculates an updated principal of 0 + 0 + 500 = 500 DAI.
+        core.exposedUpdateReserveTotalBorrowsByRateMode(
+            address(token), user, 0, 0, 500 ether, CoreLibrary.InterestRateMode.VARIABLE
+        );
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+
+        // Assert that a first variable borrow is added entirely to the variable-debt bucket.
+        // The updated principal is 0 + 0 + 500 = 500 DAI. It is added to the
+        // variable aggregate: 500 + 500 = 1,000 DAI.
+        assertEq(reserve.totalBorrowsVariable, 1_000 ether);
+
+        // Assert that a variable borrow does not accidentally change the separate stable-debt bucket.
+        // The existing stable aggregate must remain 1,000 DAI.
+        assertEq(reserve.totalBorrowsStable, 1_000 ether);
+    }
+
+    // Scenario: an existing stable-rate borrower accrues interest and takes an additional
+    // stable-rate loan. Their debt remains in the stable aggregate (`STABLE` -> `STABLE`).
+    //
+    // We verify that the helper first removes the user's old stable principal, then adds
+    // their complete updated principal (old principal + accrued interest + new borrow)
+    // back to stable debt. Variable debt must remain untouched.
+    function testUpdateReserveTotalBorrowsByRateModeKeepsStableDebtInStableAggregate() external {
+        // The stable aggregate contains 1,500 DAI. The user owns 1,000 DAI of it at 5%;
+        // the remaining 500 DAI also uses 5%, so the reserve average is correctly 5%.
+        core.setReserveBorrows(address(token), 1_500 ether, 500 ether);
+        core.setReserveCurrentAverageStableBorrowRate(address(token), 5e25);
+        core.setReserveRates(address(token), 0, 5e25, 0);
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 1_000 ether,
+                lastVariableBorrowCumulativeIndex: 0,
+                originationFee: 0,
+                stableBorrowRate: 5e25,
+                lastUpdateTimestamp: 0,
+                useAsCollateral: false
+            })
+        );
+
+        // Arguments after the reserve and user represent:
+        // - 1,000 DAI: the user's current stored stable principal;
+        // - 20 DAI: interest accrued on that principal since the previous debt update;
+        // - 500 DAI: the additional amount the user is borrowing now;
+        // - STABLE: the user keeps stable-rate debt after this borrow.
+        //
+        // Therefore, the helper removes the old 1,000 DAI stable principal and adds an
+        // updated stable principal of 1,000 + 20 + 500 = 1,520 DAI.
+        core.exposedUpdateReserveTotalBorrowsByRateMode(
+            address(token), user, 1_000 ether, 20 ether, 500 ether, CoreLibrary.InterestRateMode.STABLE
+        );
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+
+        // Remove the old 1,000 DAI stable principal, then add the updated principal:
+        // 1,500 - 1,000 + (1,000 + 20 + 500) = 2,020 DAI.
+        assertEq(reserve.totalBorrowsStable, 2_020 ether);
+
+        // Both the remaining and newly added stable debt use 5%, so the average remains 5%.
+        assertEq(reserve.currentAverageStableBorrowRate, 5e25);
+
+        // The user's debt stayed stable, so variable debt remains unchanged.
+        assertEq(reserve.totalBorrowsVariable, 500 ether);
+    }
+
+    // Scenario: an existing stable-rate borrower takes another stable-rate loan, but the
+    // remaining stable debt, the user's old debt, and the new loan all have different rates.
+    //
+    // This test isolates the weighted-average calculation performed while the debt stays
+    // in the stable aggregate (`STABLE` -> `STABLE`).
+    function testUpdateReserveTotalBorrowsByRateModeRecalculatesAverageForStableDebtAtDifferentRates() external {
+        // The 1,500 DAI stable aggregate has a 6% weighted average:
+        // - user:  1,000 DAI at 5%;
+        // - others:  500 DAI at 8%.
+        // (1,000 * 5% + 500 * 8%) / 1,500 = 6%.
+        core.setReserveBorrows(address(token), 1_500 ether, 500 ether);
+        core.setReserveCurrentAverageStableBorrowRate(address(token), 6e25);
+
+        // The current reserve stable rate is 7%, so the user's updated stable position
+        // will be added to the aggregate at 7%.
+        core.setReserveRates(address(token), 0, 7e25, 0);
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 1_000 ether,
+                lastVariableBorrowCumulativeIndex: 0,
+                originationFee: 0,
+                stableBorrowRate: 5e25,
+                lastUpdateTimestamp: 0,
+                useAsCollateral: false
+            })
+        );
+
+        // Arguments after the reserve and user represent:
+        // - 1,000 DAI: the user's old stable principal at 5%;
+        // - 20 DAI: interest accrued on that principal since the previous debt update;
+        // - 500 DAI: the additional amount the user is borrowing now;
+        // - STABLE: the user remains a stable-rate borrower.
+        // The helper therefore removes 1,000 DAI at 5%, then adds a new 7% stable
+        // position of 1,000 + 20 + 500 = 1,520 DAI.
+        core.exposedUpdateReserveTotalBorrowsByRateMode(
+            address(token), user, 1_000 ether, 20 ether, 500 ether, CoreLibrary.InterestRateMode.STABLE
+        );
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+
+        // The stable aggregate removes the old 1,000 DAI and adds the 1,520 DAI updated debt:
+        // 1,500 - 1,000 + 1,520 = 2,020 DAI.
+        assertEq(reserve.totalBorrowsStable, 2_020 ether);
+
+        // After removing the user's 1,000 DAI at 5%, the remaining 500 DAI is at 8%.
+        // The new stable average is therefore:
+        // (500 * 8% + 1,520 * 7%) / 2,020 = 7.2475247524752475247524752%.
+        // In ray units, that rate is 72_475_247_524_752_475_247_524_752.
+        assertEq(reserve.currentAverageStableBorrowRate, 72_475_247_524_752_475_247_524_752);
+
+        // The user remains stable, so the existing 500 DAI variable aggregate is unchanged.
+        assertEq(reserve.totalBorrowsVariable, 500 ether);
+    }
+
+    // Scenario: an existing stable-rate borrower accrues interest, borrows more, and
+    // selects variable rate for their resulting debt (`STABLE` -> `VARIABLE`).
+    //
+    // We verify that the helper removes the user's old principal from stable debt, then
+    // moves their complete updated principal (old principal + accrued interest + new borrow)
+    // into variable debt. The remaining stable debt and its average rate are preserved.
+    function testUpdateReserveTotalBorrowsByRateModeMovesStableDebtToVariableAggregate() external {
+        // The user owns 1,000 of the 1,500 DAI stable aggregate at 5%. The other 500 DAI
+        // is also at 5%, which makes the starting stable average exactly 5%.
+        core.setReserveBorrows(address(token), 1_500 ether, 500 ether);
+        core.setReserveCurrentAverageStableBorrowRate(address(token), 5e25);
+        core.setReserveRates(address(token), 0, 5e25, 0);
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 1_000 ether,
+                lastVariableBorrowCumulativeIndex: 0,
+                originationFee: 0,
+                stableBorrowRate: 5e25,
+                lastUpdateTimestamp: 0,
+                useAsCollateral: false
+            })
+        );
+
+        // Arguments after the reserve and user represent:
+        // - 1,000 DAI: the user's current stored stable principal;
+        // - 20 DAI: interest accrued on that principal since the previous debt update;
+        // - 500 DAI: the additional amount the user is borrowing now;
+        // - VARIABLE: the user switches their resulting debt from stable to variable rate.
+        //
+        // Therefore, the helper removes the old 1,000 DAI from stable debt and adds an
+        // updated principal of 1,000 + 20 + 500 = 1,520 DAI to variable debt.
+        core.exposedUpdateReserveTotalBorrowsByRateMode(
+            address(token), user, 1_000 ether, 20 ether, 500 ether, CoreLibrary.InterestRateMode.VARIABLE
+        );
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+
+        // The old principal leaves the stable aggregate: 1,500 - 1,000 = 500 DAI.
+        assertEq(reserve.totalBorrowsStable, 500 ether);
+
+        // The complete updated position enters the variable aggregate:
+        // 500 + (1,000 + 20 + 500) = 2,020 DAI.
+        assertEq(reserve.totalBorrowsVariable, 2_020 ether);
+
+        // The only stable debt left is the other 500 DAI loan at 5%, so the average is 5%.
+        assertEq(reserve.currentAverageStableBorrowRate, 5e25);
+    }
+
+    // Scenario: an existing variable-rate borrower accrues interest, borrows more, and
+    // selects stable rate for their resulting debt (`VARIABLE` -> `STABLE`).
+    //
+    // We verify that the helper removes the user's old principal from variable debt, then
+    // moves their complete updated principal (old principal + accrued interest + new borrow)
+    // into stable debt. The remaining variable debt must be preserved.
+    function testUpdateReserveTotalBorrowsByRateModeMovesVariableDebtToStableAggregate() external {
+        // The reserve has 1,000 DAI of stable debt at a 5% average and 1,500 DAI of variable debt.
+        // The user's 1,000 DAI principal is part of the variable aggregate.
+        core.setReserveBorrows(address(token), 1_000 ether, 1_500 ether);
+        core.setReserveCurrentAverageStableBorrowRate(address(token), 5e25);
+        core.setReserveRates(address(token), 0, 5e25, 0);
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 1_000 ether,
+                lastVariableBorrowCumulativeIndex: 1,
+                originationFee: 0,
+                stableBorrowRate: 0,
+                lastUpdateTimestamp: 0,
+                useAsCollateral: false
+            })
+        );
+
+        // Arguments after the reserve and user represent:
+        // - 1,000 DAI: the user's current stored variable principal;
+        // - 20 DAI: interest accrued on that principal since the previous debt update;
+        // - 500 DAI: the additional amount the user is borrowing now;
+        // - STABLE: the user switches their resulting debt from variable to stable rate.
+        //
+        // Therefore, the helper removes the old 1,000 DAI from variable debt and adds an
+        // updated principal of 1,000 + 20 + 500 = 1,520 DAI to stable debt.
+        core.exposedUpdateReserveTotalBorrowsByRateMode(
+            address(token), user, 1_000 ether, 20 ether, 500 ether, CoreLibrary.InterestRateMode.STABLE
+        );
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+
+        // The old variable principal is removed: 1,500 - 1,000 = 500 DAI.
+        assertEq(reserve.totalBorrowsVariable, 500 ether);
+
+        // The updated principal is 1,000 + 20 + 500 = 1,520 DAI. It moves into stable debt:
+        // 1,000 + 1,520 = 2,520 DAI.
+        assertEq(reserve.totalBorrowsStable, 2_520 ether);
+
+        // Existing and newly added stable debt both use 5%, preserving the 5% average.
+        assertEq(reserve.currentAverageStableBorrowRate, 5e25);
+    }
+
+    // Scenario: an existing variable-rate borrower accrues interest and takes an additional
+    // variable-rate loan. Their debt remains in the variable aggregate (`VARIABLE` -> `VARIABLE`).
+    //
+    // We verify that the helper first removes the user's old variable principal, then adds
+    // their complete updated principal (old principal + accrued interest + new borrow)
+    // back to variable debt. Stable debt must remain untouched.
+    function testUpdateReserveTotalBorrowsByRateModeKeepsVariableDebtInVariableAggregate() external {
+        // The user's 1,000 DAI principal is included in the reserve's 5,000 DAI variable debt.
+        core.setReserveBorrows(address(token), 1_000 ether, 5_000 ether);
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 1_000 ether,
+                lastVariableBorrowCumulativeIndex: 1,
+                originationFee: 0,
+                stableBorrowRate: 0,
+                lastUpdateTimestamp: 0,
+                useAsCollateral: false
+            })
+        );
+
+        // Arguments after the reserve and user represent:
+        // - 1,000 DAI: the user's current stored variable principal;
+        // - 20 DAI: interest accrued on that principal since the previous debt update;
+        // - 500 DAI: the additional amount the user is borrowing now;
+        // - VARIABLE: the user keeps variable-rate debt after this borrow.
+        //
+        // Therefore, the helper removes the old 1,000 DAI variable principal and adds an
+        // updated variable principal of 1,000 + 20 + 500 = 1,520 DAI.
+        core.exposedUpdateReserveTotalBorrowsByRateMode(
+            address(token), user, 1_000 ether, 20 ether, 500 ether, CoreLibrary.InterestRateMode.VARIABLE
+        );
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+
+        // Remove 1,000 DAI, then add 1,520 DAI of updated debt:
+        // 5,000 - 1,000 + (1,000 + 20 + 500) = 5,520 DAI.
+        assertEq(reserve.totalBorrowsVariable, 5_520 ether);
+
+        // The borrow stays variable, so stable debt remains 1,000 DAI.
+        assertEq(reserve.totalBorrowsStable, 1_000 ether);
+    }
+
+    // Scenario: the user owns all stable debt and switches to variable rate
+    // (`STABLE` -> `VARIABLE`).
+    //
+    // Removing their old principal empties the stable-debt bucket, so the helper must
+    // also reset the reserve's average stable borrow rate to zero.
+    function testUpdateReserveTotalBorrowsByRateModeResetsAverageWhenLastStableBorrowerSwitchesToVariable()
+        external
+    {
+        // The user is the only stable borrower: 1,000 DAI at 5%.
+        core.setReserveBorrows(address(token), 1_000 ether, 500 ether);
+        core.setReserveCurrentAverageStableBorrowRate(address(token), 5e25);
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 1_000 ether,
+                lastVariableBorrowCumulativeIndex: 0,
+                originationFee: 0,
+                stableBorrowRate: 5e25,
+                lastUpdateTimestamp: 0,
+                useAsCollateral: false
+            })
+        );
+
+        // Remove 1,000 DAI from stable debt, then move the updated 1,520 DAI
+        // (1,000 principal + 20 interest + 500 new borrow) into variable debt.
+        core.exposedUpdateReserveTotalBorrowsByRateMode(
+            address(token), user, 1_000 ether, 20 ether, 500 ether, CoreLibrary.InterestRateMode.VARIABLE
+        );
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+
+        // The user's old principal was all of the stable debt: 1,000 - 1,000 = 0 DAI.
+        assertEq(reserve.totalBorrowsStable, 0);
+
+        // An empty stable-debt bucket has no meaningful weighted average rate.
+        assertEq(reserve.currentAverageStableBorrowRate, 0);
+
+        // The old 500 DAI variable debt remains, and the updated 1,520 DAI joins it:
+        // 500 + 1,520 = 2,020 DAI.
+        assertEq(reserve.totalBorrowsVariable, 2_020 ether);
+    }
+
+    // Scenario: the user owns all variable debt and switches to stable rate
+    // (`VARIABLE` -> `STABLE`) when the reserve has no pre-existing stable debt.
+    //
+    // The first resulting stable position defines the reserve's average stable rate.
+    function testUpdateReserveTotalBorrowsByRateModeSetsAverageWhenFirstStableBorrowerComesFromVariable()
+        external
+    {
+        core.setReserveBorrows(address(token), 0, 1_000 ether);
+        core.setReserveRates(address(token), 0, 7e25, 0);
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 1_000 ether,
+                lastVariableBorrowCumulativeIndex: 1,
+                originationFee: 0,
+                stableBorrowRate: 0,
+                lastUpdateTimestamp: 0,
+                useAsCollateral: false
+            })
+        );
+
+        // Remove the user's 1,000 DAI variable principal and add their updated 1,520 DAI
+        // position to stable debt at the reserve's current stable rate of 7%.
+        core.exposedUpdateReserveTotalBorrowsByRateMode(
+            address(token), user, 1_000 ether, 20 ether, 500 ether, CoreLibrary.InterestRateMode.STABLE
+        );
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+
+        // The user owned all variable debt: 1,000 - 1,000 = 0 DAI.
+        assertEq(reserve.totalBorrowsVariable, 0);
+
+        // The first stable position is the full updated principal: 1,000 + 20 + 500 = 1,520 DAI.
+        assertEq(reserve.totalBorrowsStable, 1_520 ether);
+
+        // With only one stable position, the weighted average equals that position's 7% rate.
+        assertEq(reserve.currentAverageStableBorrowRate, 7e25);
+    }
+    
+    function testUpdateReserveTotalBorrowsByRateModeRevertsForNoneNewRateMode() external {
+        vm.expectRevert(LendingPoolCore.LendingPoolCore__InvalidBorrowRateMode.selector);
+
+        core.exposedUpdateReserveTotalBorrowsByRateMode(
+            address(token), user, 0, 0, 500 ether, CoreLibrary.InterestRateMode.NONE
+        );
     }
 }
