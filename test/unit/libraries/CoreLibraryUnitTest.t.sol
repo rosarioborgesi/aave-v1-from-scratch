@@ -561,6 +561,93 @@ contract CoreLibraryUnitTest is Test {
         assertEq(variableBorrowIndex, expectedVariableBorrowIndex);
     }
 
+    // Scenario: the reserve's variable borrow index already reflects 20% past growth (1.20 ray).
+    // After one more year at a 10% annual variable rate, the new compounded interest must be
+    // multiplied by that existing index instead of starting again from 1.00 ray.
+    function testUpdateCumulativeIndexesCompoundsFromExistingVariableBorrowIndex() external {
+        // Use a 10% annual variable borrow rate.
+        uint256 variableBorrowRate = 10e25;
+        // Start from a variable borrow index of 1.20 ray, representing 20% prior debt growth.
+        uint256 previousVariableBorrowIndex = 12e26;
+
+        // Start from the default reserve data, whose liquidity index is 1 ray.
+        CoreLibrary.ReserveData memory reserveData = _defaultReserveData();
+        // A non-zero borrow balance makes updateCumulativeIndexes accrue interest.
+        reserveData.totalBorrowsVariable = 50 ether;
+        // Set the variable rate that applies during the elapsed year.
+        reserveData.currentVariableBorrowRate = variableBorrowRate;
+        // Replace the default 1 ray variable index with the already-grown 1.20 ray index.
+        reserveData.lastVariableBorrowCumulativeIndex = previousVariableBorrowIndex;
+
+        // Store this reserve state in the harness.
+        harness.setReserveData(reserveData);
+        // Let one full year pass so the 10% annual rate compounds for 31,536,000 seconds.
+        vm.warp(block.timestamp + SECONDS_PER_YEAR);
+
+        // 10e25 / 31,536,000 = 3,170,979,198,376,458,650 ray units per second.
+        uint256 ratePerSecond = variableBorrowRate / SECONDS_PER_YEAR;
+        // 1e27 + ratePerSecond is the per-second interest factor.
+        uint256 oneSecondInterestFactor = RAY + ratePerSecond;
+        // 1.0000000031709792 ^ 31,536,000 ≈ 1.105170918.
+        uint256 compoundedVariableInterest = oneSecondInterestFactor.rayPow(SECONDS_PER_YEAR);
+
+        // The previous index is 1.20, not 1.00:
+        // newVariableBorrowIndex = 1.105170918 * 1.20 ≈ 1.326205102 ray.
+        uint256 expectedVariableBorrowIndex = compoundedVariableInterest.rayMul(previousVariableBorrowIndex);
+
+        // Update both cumulative indexes.
+        harness.updateCumulativeIndexes();
+        // Read the indexes after the update.
+        (uint256 liquidityIndex, uint256 variableBorrowIndex) = harness.getReserveIndexes();
+
+        // The liquidity rate was left at zero, so the liquidity index remains at 1 ray.
+        assertEq(liquidityIndex, RAY);
+        // The variable index compounds from the prior 1.20 ray value.
+        assertEq(variableBorrowIndex, expectedVariableBorrowIndex);
+    }
+
+    // Scenario: the reserve's liquidity index already reflects 20% past growth (1.20 ray).
+    // After one more year at a 5% liquidity rate, linear interest must be multiplied by that
+    // existing index instead of starting again from 1.00 ray.
+    function testUpdateCumulativeIndexesAccruesFromExistingLiquidityIndex() external {
+        // Use a 5% annual liquidity rate.
+        uint256 liquidityRate = 5e25;
+        // Start from a liquidity index of 1.20 ray, representing 20% prior supplier-income growth.
+        uint256 previousLiquidityIndex = 12e26;
+
+        // Start from the default reserve data, whose variable borrow index is 1 ray.
+        CoreLibrary.ReserveData memory reserveData = _defaultReserveData();
+        // A non-zero borrow balance makes updateCumulativeIndexes accrue interest.
+        reserveData.totalBorrowsStable = 100 ether;
+        // Set the liquidity rate that applies during the elapsed year.
+        reserveData.currentLiquidityRate = liquidityRate;
+        // Replace the default 1 ray liquidity index with the already-grown 1.20 ray index.
+        reserveData.lastLiquidityCumulativeIndex = previousLiquidityIndex;
+
+        // Store this reserve state in the harness.
+        harness.setReserveData(reserveData);
+        // Let one full year pass so the 5% annual liquidity rate is applied.
+        vm.warp(block.timestamp + SECONDS_PER_YEAR);
+
+        // 1e27 + 5e25 * 31,536,000 / 31,536,000 = 1.05e27, or 1.05 ray.
+        uint256 linearLiquidityInterest = RAY + liquidityRate;
+        // The previous index is 1.20, not 1.00:
+        // newLiquidityIndex = 1.05 * 1.20 = 1.26 ray.
+        uint256 expectedLiquidityIndex = linearLiquidityInterest.rayMul(previousLiquidityIndex);
+
+        // Update both cumulative indexes.
+        harness.updateCumulativeIndexes();
+        // Read the indexes after the update.
+        (uint256 liquidityIndex, uint256 variableBorrowIndex) = harness.getReserveIndexes();
+
+        // The liquidity index grows from 1.20 ray to 1.26 ray.
+        assertEq(liquidityIndex, 126e25);
+        // The variable rate was left at zero, so the variable borrow index remains at 1 ray.
+        assertEq(variableBorrowIndex, RAY);
+        // Confirm the explicit numerical expectation matches the calculated result.
+        assertEq(liquidityIndex, expectedLiquidityIndex);
+    }
+
     //////////////////////////
     //    getTotalBorrows   //
     //////////////////////////
