@@ -52,6 +52,10 @@ contract LendingPoolCoreHarness is LendingPoolCore {
         reserve.currentVariableBorrowRate = _variableBorrowRate;
     }
 
+    function setReserveVariableBorrowIndex(address _reserve, uint256 _variableBorrowIndex) external {
+        s_reserves[_reserve].lastVariableBorrowCumulativeIndex = _variableBorrowIndex;
+    }
+
     function setReserveLastUpdateTimestamp(address _reserve, uint40 _timestamp) external {
         s_reserves[_reserve].lastUpdateTimestamp = _timestamp;
     }
@@ -87,6 +91,34 @@ contract LendingPoolCoreHarness is LendingPoolCore {
         _updateReserveTotalBorrowsByRateMode(
             _reserve, _user, _principalBalance, _balanceIncrease, _amountBorrowed, _newBorrowRateMode
         );
+    }
+
+    function exposedUpdateReserveStateOnBorrow(
+        address _reserve,
+        address _user,
+        uint256 _principalBorrowBalance,
+        uint256 _balanceIncrease,
+        uint256 _amountBorrowed,
+        CoreLibrary.InterestRateMode _rateMode
+    ) external {
+        _updateReserveStateOnBorrow(
+            _reserve, _user, _principalBorrowBalance, _balanceIncrease, _amountBorrowed, _rateMode
+        );
+    }
+
+    function exposedUpdateUserStateOnBorrow(
+        address _reserve,
+        address _user,
+        uint256 _amountBorrowed,
+        uint256 _balanceIncrease,
+        uint256 _fee,
+        CoreLibrary.InterestRateMode _rateMode
+    ) external {
+        _updateUserStateOnBorrow(_reserve, _user, _amountBorrowed, _balanceIncrease, _fee, _rateMode);
+    }
+
+    function exposedGetUserCurrentBorrowRate(address _reserve, address _user) external view returns (uint256) {
+        return _getUserCurrentBorrowRate(_reserve, _user);
     }
 
     function exposedAddReserveToList(address _reserve) external {
@@ -1348,9 +1380,7 @@ contract LendingPoolCoreUnitTest is Test {
     //
     // Removing their old principal empties the stable-debt bucket, so the helper must
     // also reset the reserve's average stable borrow rate to zero.
-    function testUpdateReserveTotalBorrowsByRateModeResetsAverageWhenLastStableBorrowerSwitchesToVariable()
-        external
-    {
+    function testUpdateReserveTotalBorrowsByRateModeResetsAverageWhenLastStableBorrowerSwitchesToVariable() external {
         // The user is the only stable borrower: 1,000 DAI at 5%.
         core.setReserveBorrows(address(token), 1_000 ether, 500 ether);
         core.setReserveCurrentAverageStableBorrowRate(address(token), 5e25);
@@ -1390,9 +1420,7 @@ contract LendingPoolCoreUnitTest is Test {
     // (`VARIABLE` -> `STABLE`) when the reserve has no pre-existing stable debt.
     //
     // The first resulting stable position defines the reserve's average stable rate.
-    function testUpdateReserveTotalBorrowsByRateModeSetsAverageWhenFirstStableBorrowerComesFromVariable()
-        external
-    {
+    function testUpdateReserveTotalBorrowsByRateModeSetsAverageWhenFirstStableBorrowerComesFromVariable() external {
         core.setReserveBorrows(address(token), 0, 1_000 ether);
         core.setReserveRates(address(token), 0, 7e25, 0);
         core.setUserReserveData(
@@ -1425,12 +1453,564 @@ contract LendingPoolCoreUnitTest is Test {
         // With only one stable position, the weighted average equals that position's 7% rate.
         assertEq(reserve.currentAverageStableBorrowRate, 7e25);
     }
-    
+
     function testUpdateReserveTotalBorrowsByRateModeRevertsForNoneNewRateMode() external {
         vm.expectRevert(LendingPoolCore.LendingPoolCore__InvalidBorrowRateMode.selector);
 
         core.exposedUpdateReserveTotalBorrowsByRateMode(
             address(token), user, 0, 0, 500 ether, CoreLibrary.InterestRateMode.NONE
         );
+    }
+
+    /////////////////////////////////////
+    //     _updateUserStateOnBorrow     //
+    /////////////////////////////////////
+
+    // Scenario: a user with no existing debt takes their first stable-rate borrow. (`NONE` -> `STABLE`)
+    // The helper creates the principal and fee balances, stores the reserve's stable rate,
+    // keeps the variable index at zero, and records when the position was created.
+    function testUpdateUserStateOnBorrowFirstStableBorrowStoresRateAndKeepsVariableIndexZero() external {
+        // Use a known stable rate that the helper should copy to the new user position.
+        uint256 stableRate = 6e25; // 6% per year in ray (0.06 x 1e27)
+
+        // Configure the reserve with that stable rate.
+        core.setReserveRates(address(token), 0, stableRate, 0);
+
+        // Set the time that should be recorded for this first borrow.
+        vm.warp(3_000);
+
+        // Create a stable position by borrowing 10 DAI, with no previously accrued interest,
+        // and charge a 1 DAI origination fee.
+        core.exposedUpdateUserStateOnBorrow(
+            address(token), user, 10 ether, 0, 1 ether, CoreLibrary.InterestRateMode.STABLE
+        );
+
+        // Read the user position that was created by the borrow.
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        // With no previous debt or interest, the new principal is exactly the 10 DAI borrowed.
+        assertEq(userData.principalBorrowBalance, 10 ether);
+        // With no previous fee, the new 1 DAI fee is the complete fee balance.
+        assertEq(userData.originationFee, 1 ether);
+        // A stable borrow records the reserve's current stable rate.
+        assertEq(userData.stableBorrowRate, stableRate);
+        // A stable position does not use a variable borrow index.
+        assertEq(userData.lastVariableBorrowCumulativeIndex, 0);
+        // The helper records when this first borrow occurred.
+        assertEq(userData.lastUpdateTimestamp, 3_000);
+    }
+
+    // Scenario: a user takes a variable-rate borrow. The helper records the reserve's current
+    // variable index as the starting point for the user's variable debt and clears any stable rate. (`NONE` -> `VARIABLE`)
+    function testUpdateUserStateOnBorrowVariableStoresReserveIndexAndClearsStableRate() external {
+        // Use a known variable borrow index for the reserve.
+        // This is a cumulative index expressed in ray units (1e27). 12e26 equals 1.2e27,
+        // meaning the index is 1.2. Compared with the initial index of 1e27, it represents
+        // 20% accumulated debt growth.
+        uint256 variableBorrowIndex = 12e26;
+
+        // Configure the reserve. The stable rate is irrelevant in this variable-rate scenario.
+        core.setReserveRates(address(token), 0, 5e25, 0);
+        // Set the index that should be copied into the user's variable-rate position.
+        core.setReserveVariableBorrowIndex(address(token), variableBorrowIndex);
+
+        // Set the timestamp that the helper should save as the user's last update time.
+        vm.warp(2_000);
+
+        // Borrow 10 DAI at variable rate, recognize 5 DAI of previously calculated interest,
+        // and charge a 1 DAI origination fee.
+        core.exposedUpdateUserStateOnBorrow(
+            address(token), user, 10 ether, 5 ether, 1 ether, CoreLibrary.InterestRateMode.VARIABLE
+        );
+
+        // Read the newly created user position after the borrow updated it.
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        // The user started with zero debt, so 0 principal + 5 interest + 10 borrowed = 15 DAI.
+        assertEq(userData.principalBorrowBalance, 15 ether);
+        // The user started with no fees, so the new 1 DAI fee is the complete fee balance.
+        assertEq(userData.originationFee, 1 ether);
+        // A variable-rate borrow clears the stable-rate field.
+        assertEq(userData.stableBorrowRate, 0);
+        // A variable-rate borrow stores the reserve's current variable borrow index.
+        assertEq(userData.lastVariableBorrowCumulativeIndex, variableBorrowIndex);
+        // The helper records when the position was updated.
+        assertEq(userData.lastUpdateTimestamp, 2_000);
+    }
+
+    // Scenario: a user who already has stable-rate debt takes another stable-rate borrow.
+    // The helper refreshes the user's stable rate to the reserve's current rate and keeps the
+    // variable index at zero while adding the new debt, accrued interest, and fee. (`STABLE` -> `STABLE`)
+    function testUpdateUserStateOnBorrowUpdatesExistingStablePosition() external {
+        // Use the reserve's new stable rate, which replaces the user's older stable rate.
+        uint256 newStableRate = 6e25;  // 6% per year in ray (0.06 x 1e27)
+        // Configure the reserve with the rate the user should receive for the new stable borrow.
+        core.setReserveRates(address(token), 0, newStableRate, 0);
+
+        // Seed a user position that is already borrowing at a stable rate.
+        core.setUserReserveData(
+            // Store the position for this borrower.
+            user,
+            // Store the position for the DAI reserve.
+            address(token),
+            CoreLibrary.UserReserveData({
+                // The user already owes 100 DAI of principal.
+                principalBorrowBalance: 100 ether,
+                // Stable debt does not use a variable borrow index.
+                lastVariableBorrowCumulativeIndex: 0,
+                // The user already owes 2 DAI in origination fees.
+                originationFee: 2 ether,
+                // This previous stable rate should be replaced by the reserve's current rate.
+                stableBorrowRate: 5e25,
+                // This old timestamp should be replaced after the new borrow.
+                lastUpdateTimestamp: 1,
+                // This unrelated setting should remain unchanged.
+                useAsCollateral: true
+            })
+        );
+
+        // Set the time the helper should save for this additional stable borrow.
+        vm.warp(5_000);
+        // Borrow another 10 DAI at stable rate, recognize 5 DAI of accrued interest, and charge a 1 DAI fee.
+        core.exposedUpdateUserStateOnBorrow(
+            address(token), user, 10 ether, 5 ether, 1 ether, CoreLibrary.InterestRateMode.STABLE
+        );
+
+        // Read the updated stable-rate position.
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+        // Previous principal (100) + accrued interest (5) + new borrow (10) = 115 DAI.
+        assertEq(userData.principalBorrowBalance, 115 ether);
+        // Previous fee (2) + new fee (1) = 3 DAI.
+        assertEq(userData.originationFee, 3 ether);
+        // The user receives the reserve's current stable rate, replacing the old 5% rate.
+        assertEq(userData.stableBorrowRate, newStableRate);
+        // The position remains stable, so its variable index stays zero.
+        assertEq(userData.lastVariableBorrowCumulativeIndex, 0);
+        // The helper records when the stable position was updated.
+        assertEq(userData.lastUpdateTimestamp, 5_000);
+        // Borrowing does not change whether this deposit is used as collateral.
+        assertTrue(userData.useAsCollateral);
+    }
+
+    // Scenario: a user who already has variable-rate debt takes another variable-rate borrow.
+    // The helper refreshes the user's variable index to the reserve's current index and keeps the
+    // stable rate at zero while adding the new debt, accrued interest, and fee. (`VARIABLE` -> `VARIABLE`)
+    function testUpdateUserStateOnBorrowUpdatesExistingVariablePosition() external {
+        // Use a known reserve variable index that should replace the user's previous index.
+        uint256 newVariableBorrowIndex = 13e26; // the variable debt index has grown by 30% since the start (1e27)
+        // Configure the reserve with the index that applies to the updated variable position.
+        core.setReserveVariableBorrowIndex(address(token), newVariableBorrowIndex);
+
+        // Seed a user position that is already borrowing at a variable rate.
+        core.setUserReserveData(
+            // Store the position for this borrower.
+            user,
+            // Store the position for the DAI reserve.
+            address(token),
+            CoreLibrary.UserReserveData({
+                // The user already owes 100 DAI of principal.
+                principalBorrowBalance: 100 ether,
+                // This older variable index should be replaced by the reserve's current index.
+                lastVariableBorrowCumulativeIndex: 11e26,
+                // The user already owes 2 DAI in origination fees.
+                originationFee: 2 ether,
+                // Variable debt does not use a stable borrow rate.
+                stableBorrowRate: 0,
+                // This old timestamp should be replaced after the new borrow.
+                lastUpdateTimestamp: 1,
+                // This unrelated setting should remain unchanged.
+                useAsCollateral: true
+            })
+        );
+
+        // Set the time the helper should save for this additional variable borrow.
+        vm.warp(6_000);
+        // Borrow another 10 DAI at variable rate, recognize 5 DAI of accrued interest, and charge a 1 DAI fee.
+        core.exposedUpdateUserStateOnBorrow(
+            address(token), user, 10 ether, 5 ether, 1 ether, CoreLibrary.InterestRateMode.VARIABLE
+        );
+
+        // Read the updated variable-rate position.
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+        // Previous principal (100) + accrued interest (5) + new borrow (10) = 115 DAI.
+        assertEq(userData.principalBorrowBalance, 115 ether);
+        // Previous fee (2) + new fee (1) = 3 DAI.
+        assertEq(userData.originationFee, 3 ether);
+        // The position remains variable, so its stable rate stays zero.
+        assertEq(userData.stableBorrowRate, 0);
+        // The user's previous index is refreshed to the reserve's current variable index.
+        assertEq(userData.lastVariableBorrowCumulativeIndex, newVariableBorrowIndex);
+        // The helper records when the variable position was updated.
+        assertEq(userData.lastUpdateTimestamp, 6_000);
+        // Borrowing does not change whether this deposit is used as collateral.
+        assertTrue(userData.useAsCollateral);
+    }
+
+    // Scenario: a user with an existing variable-rate position takes a new stable-rate borrow. (`VARIABLE` -> `STABLE`)
+    // The helper adds accrued interest and the new amount to the user's principal, adds the
+    // origination fee, clears the old variable index, stores the reserve's stable rate, and
+    // records when the position was updated.
+    function testUpdateUserStateOnBorrowStableStoresReserveRateAndClearsVariableIndex() external {
+        // Use a 5% stable borrow rate for the reserve.
+        uint256 stableRate = 5e25;
+        // Use a known block timestamp so we can verify it is stored on the user position.
+        uint256 timestamp = 1_000;
+
+        // Configure the reserve with the stable rate that should be assigned to the user.
+        core.setReserveRates(address(token), 0, stableRate, 0);
+        // Give the reserve a variable index; a stable borrow must not copy this value.
+        core.setReserveVariableBorrowIndex(address(token), 2e27);
+
+        // Seed a user position that currently has variable-rate debt.
+        core.setUserReserveData(
+            // Store the position for this borrower.
+            user,
+            // Store the position for the DAI reserve.
+            address(token),
+            CoreLibrary.UserReserveData({
+                // The user already owes 100 DAI of principal.
+                principalBorrowBalance: 100 ether,
+                // A non-zero index identifies the existing variable-rate position.
+                lastVariableBorrowCumulativeIndex: RAY,
+                // The user already owes 2 DAI in origination fees.
+                originationFee: 2 ether,
+                // This old stable rate should be replaced by the reserve's current rate.
+                stableBorrowRate: 3e25,
+                // This old timestamp should be replaced by the current block timestamp.
+                lastUpdateTimestamp: 1,
+                // This unrelated setting should remain unchanged.
+                useAsCollateral: true
+            })
+        );
+
+        // Set the block time that the helper should save as the user's last update time.
+        vm.warp(timestamp);
+
+        // Borrow 10 DAI at stable rate, recognize 5 DAI of accrued interest, and charge a 1 DAI fee.
+        core.exposedUpdateUserStateOnBorrow(
+            address(token), user, 10 ether, 5 ether, 1 ether, CoreLibrary.InterestRateMode.STABLE
+        );
+
+        // Read the user's position after the borrow updated it.
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        // Previous principal (100) + accrued interest (5) + new borrow (10) = 115 DAI.
+        assertEq(userData.principalBorrowBalance, 115 ether);
+        // Previous fee (2) + new fee (1) = 3 DAI.
+        assertEq(userData.originationFee, 3 ether);
+        // A stable borrow uses the reserve's current stable rate.
+        assertEq(userData.stableBorrowRate, stableRate);
+        // A stable borrow clears the variable-rate index.
+        assertEq(userData.lastVariableBorrowCumulativeIndex, 0);
+        // The helper records the timestamp of this update.
+        assertEq(userData.lastUpdateTimestamp, timestamp);
+        // Borrowing does not change whether this deposit is used as collateral.
+        assertTrue(userData.useAsCollateral);
+    }
+
+    // Scenario: a user with an existing stable-rate position takes a variable-rate borrow.
+    // The helper clears the stable rate, copies the reserve's variable index, and adds the
+    // new debt, accrued interest, and fee to the user's existing position. (`STABLE` -> `VARIABLE`)
+    function testUpdateUserStateOnBorrowSwitchesStablePositionToVariable() external {
+        // Use a known reserve variable index that should become the user's starting index.
+        // Compared with the initial index of 1e27, it represents 10% accumulated growth in variable debt.
+        uint256 variableBorrowIndex = 11e26;
+
+        // Configure the reserve's variable index.
+        core.setReserveVariableBorrowIndex(address(token), variableBorrowIndex);
+
+        // Seed a user position that currently has stable-rate debt.
+        core.setUserReserveData(
+            // Store the position for this borrower.
+            user,
+            // Store the position for the DAI reserve.
+            address(token),
+            CoreLibrary.UserReserveData({
+                // The user already owes 100 DAI of principal.
+                principalBorrowBalance: 100 ether,
+                // Stable debt does not use a variable borrow index.
+                lastVariableBorrowCumulativeIndex: 0,
+                // The user already owes 2 DAI in origination fees.
+                originationFee: 2 ether,
+                // A non-zero stable rate identifies the existing stable-rate position.
+                stableBorrowRate: 5e25,
+                // This old timestamp should be replaced after the new borrow.
+                lastUpdateTimestamp: 1,
+                // This unrelated setting should remain unchanged.
+                useAsCollateral: true
+            })
+        );
+
+        // Set the time the helper should save for the rate-mode switch.
+        vm.warp(4_000);
+
+        // Borrow 10 DAI at variable rate, recognize 5 DAI of accrued interest, and charge a 1 DAI fee.
+        core.exposedUpdateUserStateOnBorrow(
+            address(token), user, 10 ether, 5 ether, 1 ether, CoreLibrary.InterestRateMode.VARIABLE
+        );
+
+        // Read the user position after it changed from stable to variable.
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        // Previous principal (100) + accrued interest (5) + new borrow (10) = 115 DAI.
+        assertEq(userData.principalBorrowBalance, 115 ether);
+        // Previous fee (2) + new fee (1) = 3 DAI.
+        assertEq(userData.originationFee, 3 ether);
+        // A variable-rate borrow clears the stable rate from the old position.
+        assertEq(userData.stableBorrowRate, 0);
+        // A variable-rate borrow stores the reserve's current variable index.
+        assertEq(userData.lastVariableBorrowCumulativeIndex, variableBorrowIndex);
+        // The helper records when the position changed rate modes.
+        assertEq(userData.lastUpdateTimestamp, 4_000);
+        // Borrowing does not change whether this deposit is used as collateral.
+        assertTrue(userData.useAsCollateral);
+    }
+
+    function testUpdateUserStateOnBorrowRevertsForNoneRateMode() external {
+        vm.expectRevert(LendingPoolCore.LendingPoolCore__InvalidBorrowRateMode.selector);
+
+        core.exposedUpdateUserStateOnBorrow(
+            address(token), user, 10 ether, 5 ether, 1 ether, CoreLibrary.InterestRateMode.NONE
+        );
+    }
+
+    /////////////////////////////////////
+    //     _getUserCurrentBorrowRate     //
+    /////////////////////////////////////
+
+    // Scenario: a user has no principal debt. Their rate mode is NONE, so the helper returns zero.
+    function testGetUserCurrentBorrowRateReturnsZeroWhenUserHasNoDebt() external view {
+        // The user has no configured position, meaning their principal borrow balance is zero.
+        uint256 currentBorrowRate = core.exposedGetUserCurrentBorrowRate(address(token), user);
+
+        // A user with no debt has no active borrow rate.
+        assertEq(currentBorrowRate, 0);
+    }
+
+    // Scenario: a user has stable-rate debt. The helper returns the rate stored on the user,
+    // rather than the reserve's current stable rate, because their existing debt keeps its own rate.
+    function testGetUserCurrentBorrowRateReturnsUsersStableRate() external {
+        // Use the rate stored on the user's existing stable borrow.
+        uint256 userStableRate = 5e25; // 5%
+        // Use a different current reserve stable rate to prove it is not returned for existing stable debt.
+        uint256 reserveStableRate = 6e25;
+        // Configure the reserve with the different current stable rate.
+        core.setReserveRates(address(token), 0, reserveStableRate, 0);
+
+        // Seed a user position with principal debt and a non-zero stable rate.
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether,
+                lastVariableBorrowCumulativeIndex: 0,
+                originationFee: 0,
+                stableBorrowRate: userStableRate,
+                lastUpdateTimestamp: 0,
+                useAsCollateral: false
+            })
+        );
+
+        // Read the current rate for this stable borrower.
+        uint256 currentBorrowRate = core.exposedGetUserCurrentBorrowRate(address(token), user);
+
+        // Stable debt uses the stable rate stored in the user's own position.
+        assertEq(currentBorrowRate, userStableRate);
+    }
+
+    // Scenario: a user has variable-rate debt. The helper returns the reserve's current variable
+    // rate, because variable-rate debt changes as the reserve's variable rate changes.
+    function testGetUserCurrentBorrowRateReturnsReserveVariableRate() external {
+        // Use the reserve's current variable borrow rate that the helper should return.
+        uint256 reserveVariableRate = 4e25; // 4%
+        // Configure the reserve with that variable rate.
+        core.setReserveRates(address(token), 0, 0, reserveVariableRate);
+
+        // Seed a user position with principal debt but no stable rate, which identifies variable debt.
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether,
+                lastVariableBorrowCumulativeIndex: RAY,
+                originationFee: 0,
+                stableBorrowRate: 0,
+                lastUpdateTimestamp: 0,
+                useAsCollateral: false
+            })
+        );
+
+        // Read the current rate for this variable borrower.
+        uint256 currentBorrowRate = core.exposedGetUserCurrentBorrowRate(address(token), user);
+
+        // Variable debt uses the reserve's current variable rate.
+        assertEq(currentBorrowRate, reserveVariableRate);
+    }
+
+    //////////////////////////////////////////
+    //     getUserCurrentBorrowRateMode     //
+    //////////////////////////////////////////
+
+    // Scenario: a user has no principal debt. The function reports that the user has no borrow mode.
+    function testGetUserCurrentBorrowRateModeReturnsNoneWhenUserHasNoDebt() external view {
+        // An uninitialized user position has a principal borrow balance of zero.
+        CoreLibrary.InterestRateMode rateMode = core.getUserCurrentBorrowRateMode(address(token), user);
+
+        // Without debt, the user is in the NONE mode.
+        assertEq(uint256(rateMode), uint256(CoreLibrary.InterestRateMode.NONE));
+    }
+
+    // Scenario: a user has principal debt and a non-zero stable rate. The function identifies it as stable debt.
+    function testGetUserCurrentBorrowRateModeReturnsStableForStableDebt() external {
+        // Seed a user position with principal debt and a stable rate.
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                // A non-zero principal means the user has an active borrow.
+                principalBorrowBalance: 100 ether,
+                // Stable debt does not use a variable borrow index.
+                lastVariableBorrowCumulativeIndex: 0,
+                originationFee: 0,
+                // A non-zero stable rate marks this position as stable-rate debt.
+                stableBorrowRate: 5e25,
+                lastUpdateTimestamp: 0,
+                useAsCollateral: false
+            })
+        );
+
+        // Read the rate mode inferred from the user's position.
+        CoreLibrary.InterestRateMode rateMode = core.getUserCurrentBorrowRateMode(address(token), user);
+
+        // Principal debt plus a stable rate means the user is borrowing at a stable rate.
+        assertEq(uint256(rateMode), uint256(CoreLibrary.InterestRateMode.STABLE));
+    }
+
+    // Scenario: a user has principal debt but no stable rate. The function identifies it as variable debt.
+    function testGetUserCurrentBorrowRateModeReturnsVariableForVariableDebt() external {
+        // Seed a user position with principal debt and no stable rate.
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                // A non-zero principal means the user has an active borrow.
+                principalBorrowBalance: 100 ether,
+                // A variable position stores a variable borrow index.
+                lastVariableBorrowCumulativeIndex: RAY,
+                originationFee: 0,
+                // A zero stable rate marks this position as variable-rate debt.
+                stableBorrowRate: 0,
+                lastUpdateTimestamp: 0,
+                useAsCollateral: false
+            })
+        );
+
+        // Read the rate mode inferred from the user's position.
+        CoreLibrary.InterestRateMode rateMode = core.getUserCurrentBorrowRateMode(address(token), user);
+
+        // Principal debt with no stable rate means the user is borrowing at a variable rate.
+        assertEq(uint256(rateMode), uint256(CoreLibrary.InterestRateMode.VARIABLE));
+    }
+
+    /////////////////////////////////////////
+    //     _updateReserveStateOnBorrow     //
+    /////////////////////////////////////////
+
+    // Scenario: a user with no debt takes their first stable-rate borrow. There is no prior
+    // interest to accrue, so the helper adds the new debt to the stable aggregate only.
+    function testUpdateReserveStateOnBorrowAddsFirstStableBorrowToReserveTotals()
+        external
+        withInitReserve(address(token))
+    {
+        // The reserve's current stable rate is used to calculate its stable-debt average.
+        uint256 stableBorrowRate = 5e25;
+        // Configure the reserve with the stable rate.
+        core.setReserveRates(address(token), 0, stableBorrowRate, 0);
+
+        // Update the reserve state for a first 100 DAI stable borrow.
+        // The previous principal and accrued interest are both zero because the user had no debt.
+        core.exposedUpdateReserveStateOnBorrow(
+            address(token), user, 0, 0, 100 ether, CoreLibrary.InterestRateMode.STABLE
+        );
+
+        // Read the reserve after the borrow updated its global state.
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+
+        // The full new borrow is stable debt.
+        assertEq(reserve.totalBorrowsStable, 100 ether);
+        // No variable debt was created.
+        assertEq(reserve.totalBorrowsVariable, 0);
+        // With one stable borrower, the average equals that borrower's 5% rate.
+        assertEq(reserve.currentAverageStableBorrowRate, stableBorrowRate);
+        // No time elapsed, so both cumulative indexes remain at their initialized value of 1 ray.
+        assertEq(reserve.lastLiquidityCumulativeIndex, RAY);
+        assertEq(reserve.lastVariableBorrowCumulativeIndex, RAY);
+    }
+
+    // Scenario: a user has 100 DAI of variable debt, then changes to a stable-rate borrow after
+    // one year. The helper first accrues the reserve indexes using the old rates, then removes the
+    // old variable principal and adds the updated 115 DAI position to stable debt. (`VARIABLE` -> `STABLE`)
+    function testUpdateReserveStateOnBorrowAccruesIndexesAndMovesVariableDebtToStable()
+        external
+        withInitReserve(address(token))
+    {
+        // The old rates apply while the reserve indexes accrue for the elapsed year.
+        uint256 oldLiquidityRate = 5e25;
+        uint256 oldVariableBorrowRate = 10e25;
+        // The current stable rate applies to the user's updated stable position.
+        uint256 stableBorrowRate = 7e25;
+        // Configure all reserve rates before time passes.
+        core.setReserveRates(address(token), oldLiquidityRate, stableBorrowRate, oldVariableBorrowRate);
+        // Store the current time as the reserve's last update so the next accrual period is exactly one year.
+        uint256 previousTimestamp = block.timestamp;
+        core.setReserveLastUpdateTimestamp(address(token), uint40(previousTimestamp));
+
+        // The reserve initially has exactly the user's 100 DAI variable debt.
+        core.setReserveBorrows(address(token), 0, 100 ether);
+        // Mark the user's existing position as variable debt: non-zero principal and zero stable rate.
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether,
+                lastVariableBorrowCumulativeIndex: RAY,
+                originationFee: 0,
+                stableBorrowRate: 0,
+                lastUpdateTimestamp: 0,
+                useAsCollateral: false
+            })
+        );
+
+        // Allow one full year of interest to accrue before the new borrow action.
+        vm.warp(previousTimestamp + 365 days);
+
+        // Change the user's rate mode to stable while borrowing 10 more DAI.
+        // The caller has already calculated 5 DAI of interest on the old 100 DAI principal.
+        core.exposedUpdateReserveStateOnBorrow(
+            address(token), user, 100 ether, 5 ether, 10 ether, CoreLibrary.InterestRateMode.STABLE
+        );
+
+        // Read the reserve after indexes and borrow totals were updated.
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+
+        // A 5% liquidity rate for one full year applies linear interest: 1.00 * 1.05 = 1.05 ray.
+        assertEq(reserve.lastLiquidityCumulativeIndex, 105e25);
+        // A 10% variable rate compounds each second for one year.
+        // 10e25 / 31,536,000 = 3,170,979,198,376,458,650 ray units per second.
+        // This represents the 10% annual rate split into 31,536,000 one-second periods.
+        uint256 ratePerSecond = oldVariableBorrowRate / 365 days;
+        // RAY + ratePerSecond represents 1.0000000031709792 of growth for one second.
+        // 1.0000000031709792 ^ 31,536,000 ≈ 1.105170918, which is about 10.517% yearly growth.
+        uint256 compoundedVariableInterest = (RAY + ratePerSecond).rayPow(365 days);
+        // The previous variable borrow index was 1 ray (1.00), so ray multiplication gives:
+        // RAY.rayMul(compoundedVariableInterest) = 1.00 * 1.105170918... = 1.105170918... ray.
+        assertEq(reserve.lastVariableBorrowCumulativeIndex, RAY.rayMul(compoundedVariableInterest));
+
+        // The helper removes the old 100 DAI variable principal from the variable aggregate.
+        assertEq(reserve.totalBorrowsVariable, 0);
+        // It adds the updated position: 100 previous principal + 5 interest + 10 borrowed = 115 DAI.
+        assertEq(reserve.totalBorrowsStable, 115 ether);
+        // The first stable position defines the stable-debt average rate.
+        assertEq(reserve.currentAverageStableBorrowRate, stableBorrowRate);
     }
 }
