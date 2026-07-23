@@ -526,8 +526,17 @@ contract CoreLibraryUnitTest is Test {
         //
         // compoundedInterest =
         //     (RAY + variableBorrowRate / SECONDS_PER_YEAR) ^ SECONDS_PER_YEAR
+
+        // 10e25 / 31,536,000 = 3,170,979,198,376,458,650.
+        // This is the 10% annual rate divided into one-second ray-scaled increments.
         uint256 ratePerSecond = variableBorrowRate / SECONDS_PER_YEAR;
+
+        // 1e27 + 3,170,979,198,376,458,650 = 1,000,000,003,170,979,198,376,458,650.
+        // In decimal form, this one-second interest factor is approximately 1.0000000031709792.
         uint256 oneSecondInterestFactor = RAY + ratePerSecond;
+
+        // 1.0000000031709792 ^ 31,536,000 ≈ 1.105170918.
+        // Therefore, compounding a 10% annual rate every second for one year produces about 10.517% growth.
         uint256 compoundedVariableInterest = oneSecondInterestFactor.rayPow(SECONDS_PER_YEAR);
 
         // The previous variable borrow index is 1 ray:
@@ -537,6 +546,10 @@ contract CoreLibraryUnitTest is Test {
         //
         // newVariableBorrowIndex =
         //     compoundedVariableInterest * 1.00
+
+        // The previous variable borrow index is 1e27, which represents 1.00.
+        // Therefore: 1.105170918 ray * 1.00 ray / 1e27 = 1.105170918 ray.
+        // Multiplying by 1 ray leaves the compounded-interest factor unchanged.
         uint256 expectedVariableBorrowIndex =
             compoundedVariableInterest.rayMul(reserveData.lastVariableBorrowCumulativeIndex);
 
