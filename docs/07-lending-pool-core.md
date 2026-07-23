@@ -558,6 +558,56 @@ First, `updateCumulativeIndexes()` materializes interest accrued since the reser
 
 It deliberately operates before rates are recalculated: previously accrued interest must use the rates and indexes that existed before the new liquidity is removed.
 
+### Example 1: first stable borrow
+
+Assume a user has no debt and borrows `100 DAI` at a stable rate. No time has passed since the reserve was last updated.
+
+```text
+Before:
+liquidity index        = 1.00 ray
+variable borrow index  = 1.00 ray
+total stable borrows   = 0 DAI
+total variable borrows = 0 DAI
+
+After _updateReserveStateOnBorrow(..., 0, 0, 100 DAI, STABLE):
+liquidity index        = 1.00 ray  (no elapsed time, so no interest to materialize)
+variable borrow index  = 1.00 ray
+total stable borrows   = 100 DAI
+total variable borrows = 0 DAI
+```
+
+The helper only updates reserve-level state. The separate `_updateUserStateOnBorrow()` call records the `100 DAI` principal, stable rate, fee, and timestamp on the user's position.
+
+### Example 2: switch variable debt to stable debt after interest accrues
+
+Assume the reserve has a `5%` liquidity rate and a `10%` variable borrow rate. A user is the only variable borrower with `100 DAI` of principal. One year passes, then the user borrows another `10 DAI` at stable rate. The caller has already calculated `5 DAI` of accrued interest on the user's previous debt.
+
+```text
+Before the borrow:
+liquidity index        = 1.00 ray
+variable borrow index  = 1.00 ray
+total stable borrows   = 0 DAI
+total variable borrows = 100 DAI
+
+Updated user principal = 100 + 5 + 10 = 115 DAI
+```
+
+`_updateReserveStateOnBorrow()` first materializes the year of interest using the old rates:
+
+```text
+liquidity index        = 1.00 × 1.05 = 1.05 ray
+variable borrow index  ≈ 1.00 × 1.105170918 = 1.105170918 ray
+```
+
+It then moves the user's debt between the reserve aggregates:
+
+```text
+total variable borrows = 100 - 100 = 0 DAI
+total stable borrows   = 0 + 115 = 115 DAI
+```
+
+The key ordering is: accrue old interest first, then move/add the updated debt. Later in `updateStateOnBorrow()`, the core updates the user's position and recalculates the reserve's rates for the newly removed liquidity.
+
 ## `_updateReserveTotalBorrowsByRateMode`
 
 ```solidity
