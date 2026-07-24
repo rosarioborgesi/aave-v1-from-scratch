@@ -546,6 +546,725 @@ The return values are:
 
 For a stable loan, the returned rate is the stable rate recorded on the user. For a variable loan, it is the reserve's current variable borrow rate.
 
+## Worked Example: a First Stable Borrow After Time Has Passed
+
+This example covers a user with **no existing debt** taking a stable-rate loan. It also deliberately lets one year pass since the reserve's previous update. That elapsed time affects the reserve-wide indexes because the reserve already has debt, but it does not create any historical debt or interest for the new borrower.
+
+Amounts are shown in DAI and rates are simplified annual rates; the contract stores rates and indexes in ray precision. Assume Bob already has `5,000 DAI` of stable debt at the reserve's `7%` weighted average stable rate. Alice has never borrowed DAI. The reserve was last updated one year ago, and Alice now borrows `500 DAI` in stable mode with a `5 DAI` origination fee.
+
+```text
+Call:
+updateStateOnBorrow(DAI, Alice, 500 DAI, 5 DAI, STABLE)
+
+Before:
+Alice principalBorrowBalance             = 0 DAI
+Alice stableBorrowRate                   = 0
+Alice lastUpdateTimestamp                = 0
+Alice lastVariableBorrowCumulativeIndex  = 0
+
+reserve liquidity index                  = 1.00
+reserve variable borrow index            = 1.00
+reserve lastUpdateTimestamp              = one year ago
+reserve currentLiquidityRate             = 5%
+reserve currentStableBorrowRate          = 9%
+reserve currentVariableBorrowRate        = 10%
+reserve totalBorrowsStable               = 5,000 DAI
+reserve totalBorrowsVariable             = 0 DAI
+reserve currentAverageStableBorrowRate   = 7%
+core's DAI balance                       = 10,000 DAI
+```
+
+### 1. `getUserBorrowBalances()` finds no prior Alice debt
+
+`updateStateOnBorrow()` starts with `getUserBorrowBalances(DAI, Alice)`. This is a view call: it calculates values but does not change storage.
+
+Alice's stored `principalBorrowBalance` is zero, so the function returns immediately:
+
+```text
+principalBorrowBalance = 0 DAI
+compoundedBalance      = 0 DAI
+balanceIncrease        = 0 DAI
+```
+
+The one-year interval does not make Alice owe interest. Interest belongs to a debt position, and Alice has no previous principal, stable rate, or debt timestamp to compound. Her stable rate will only be set later in this transaction.
+
+### 2. `_updateReserveStateOnBorrow()` checkpoints the old reserve state
+
+`_updateReserveStateOnBorrow()` first calls `updateCumulativeIndexes()`. The reserve has `5,000 DAI` of total borrow debt, so it checkpoints the elapsed year using the **old** reserve rates:
+
+```text
+liquidity index       = 1.00 × (1 + 5%)    = 1.05
+variable borrow index = 1.00 × 1.105170918 ≈ 1.105170918
+```
+
+The liquidity index records the year's supplier interest. The variable-borrow index also advances because `updateCumulativeIndexes()` checks whether *total* reserve borrowing is nonzero, not whether variable debt is nonzero. In this scenario there is only stable debt, so that variable-index update does not change any user's stable balance.
+
+Checkpointing happens before the new `500 DAI` loan changes debt totals and before the reserve is repriced. Therefore the elapsed year is accounted for at the old `5%` liquidity and `10%` variable rates.
+
+Next, `_updateReserveTotalBorrowsByRateMode()` reads Alice's previous mode. Since her stored principal is zero, `getUserCurrentBorrowRateMode()` returns `NONE`:
+
+```text
+previous rate mode = NONE
+previous principal = 0 DAI
+balanceIncrease    = 0 DAI
+new borrow         = 500 DAI
+updated principal  = 0 + 0 + 500 = 500 DAI
+```
+
+There is no old Alice debt to remove from either aggregate. Since the selected new mode is `STABLE`, the helper adds the complete `500 DAI` position to `totalBorrowsStable` at the reserve's current `9%` stable rate. It recomputes the weighted average stable rate:
+
+```text
+totalBorrowsStable = 5,000 + 500
+                   = 5,500 DAI
+
+new average stable rate =
+    (5,000 × 7% + 500 × 9%) / 5,500
+    ≈ 7.181818%
+
+totalBorrowsVariable = 0 DAI
+```
+
+The reserve's stable aggregate rises by exactly `500 DAI`. Unlike an additional borrow, there is no Alice interest to materialize and no old Alice principal to remove first.
+
+### 3. `_updateUserStateOnBorrow()` creates Alice's stable position
+
+Because Alice chose `STABLE`, `_updateUserStateOnBorrow()` takes the reserve's currently stored stable rate (`9%`) and records it on Alice's new position. It clears the variable-index checkpoint, adds the borrowed amount and accrued interest to her principal, adds the origination fee, and writes the current timestamp:
+
+```text
+Alice stableBorrowRate                   = 9%
+Alice lastVariableBorrowCumulativeIndex  = 0
+Alice principalBorrowBalance             = 0 + 500 + 0 = 500 DAI
+Alice originationFee                     = 0 + 5 = 5 DAI
+Alice lastUpdateTimestamp                = block.timestamp
+```
+
+From this block onward, Alice's `500 DAI` stable principal accrues at her stored `9%` rate. The earlier one-year interval is not included in her position: her `lastUpdateTimestamp` begins now.
+
+### 4. `_updateReserveInterestRatesAndTimestamp()` prices the new loan for future actions
+
+`LendingPool` has not transferred the DAI to Alice yet, so `getReserveAvailableLiquidity()` still reads the core's actual `10,000 DAI` balance. `_updateReserveInterestRatesAndTimestamp()` accounts for the pending transfer by passing `_liquidityTaken = 500 DAI` to the strategy:
+
+```text
+liquidity supplied to strategy = 10,000 + 0 - 500 = 9,500 DAI
+strategy inputs                = 9,500 DAI liquidity,
+                                 5,500 DAI stable debt,
+                                 0 DAI variable debt,
+                                 7.181818% average stable rate
+```
+
+The concrete output depends on the configured strategy. For a `MockReserveInterestRateStrategy` example, suppose it is preset to return:
+
+```text
+new liquidity rate       = 4%  = 4e25 ray
+new stable borrow rate   = 10% = 10e25 ray
+new variable borrow rate = 11% = 11e25 ray
+```
+
+The core stores those three future reserve rates and sets `reserve.lastUpdateTimestamp` to `block.timestamp`. Alice's rate is already fixed at the `9%` rate that existed when her position was created. `_getUserCurrentBorrowRate()` therefore returns her stored rate, so this call returns:
+
+```text
+user borrow rate = 9% = 9e25 ray
+balanceIncrease  = 0 DAI
+```
+
+The newly stored `10%` stable rate is the rate offered to later stable borrowers; it does not retroactively change Alice's loan. After this accounting call returns, `LendingPool` transfers the `500 DAI` to Alice. The core's actual DAI balance then becomes `9,500 DAI`, matching the liquidity used to calculate the new reserve rates.
+
+## Worked Example: a First Variable Borrow After Time Has Passed
+
+This is the equivalent first-borrow case for a variable-rate loan. Alice has **no existing DAI debt**, while Bob already has variable debt in the same reserve. One year has passed since the reserve was last updated. The elapsed time checkpoints Bob's and suppliers' reserve-wide indexes, but Alice has no prior position from which to accrue interest.
+
+Amounts are shown in DAI and rates are simplified annual rates; the contract stores rates and indexes in ray precision. Assume Bob's and other users' stored variable principal totals `5,000 DAI`. Alice now borrows `500 DAI` in variable mode with a `5 DAI` origination fee.
+
+```text
+Call:
+updateStateOnBorrow(DAI, Alice, 500 DAI, 5 DAI, VARIABLE)
+
+Before:
+Alice principalBorrowBalance             = 0 DAI
+Alice stableBorrowRate                   = 0
+Alice lastUpdateTimestamp                = 0
+Alice lastVariableBorrowCumulativeIndex  = 0
+
+reserve liquidity index                  = 1.00
+reserve variable borrow index            = 1.00
+reserve lastUpdateTimestamp              = one year ago
+reserve currentLiquidityRate             = 5%
+reserve currentStableBorrowRate          = 9%
+reserve currentVariableBorrowRate        = 10%
+reserve totalBorrowsStable               = 0 DAI
+reserve totalBorrowsVariable             = 5,000 DAI
+reserve currentAverageStableBorrowRate   = 0
+core's DAI balance                       = 10,000 DAI
+```
+
+### 1. `getUserBorrowBalances()` finds no prior Alice debt
+
+`updateStateOnBorrow()` calls `getUserBorrowBalances(DAI, Alice)` first. This is a view calculation and does not write storage. Since Alice's stored principal is zero, the function returns without using either her unset variable-index checkpoint or the reserve's current variable index:
+
+```text
+principalBorrowBalance = 0 DAI
+compoundedBalance      = 0 DAI
+balanceIncrease        = 0 DAI
+```
+
+Alice does not pay for the preceding year. Variable interest is calculated by scaling an existing principal from that user's last variable-index checkpoint; Alice has neither an existing principal nor a checkpointed position yet.
+
+### 2. `_updateReserveStateOnBorrow()` checkpoints existing variable debt and adds Alice's debt
+
+`_updateReserveStateOnBorrow()` first calls `updateCumulativeIndexes()`. Because the reserve's total borrows are nonzero, it writes the interest accrued during the year using the **old** reserve rates:
+
+```text
+liquidity index       = 1.00 × (1 + 5%)    = 1.05
+variable borrow index = 1.00 × 1.105170918 ≈ 1.105170918
+```
+
+The liquidity index captures the year's supplier income. The variable-borrow index captures the year's variable-debt growth for Bob and any other existing variable borrowers. It is written before Alice's new borrow changes utilization and therefore before the strategy produces future rates.
+
+Next, `_updateReserveTotalBorrowsByRateMode()` reads Alice's previous mode. `getUserCurrentBorrowRateMode()` returns `NONE`, because her stored principal is still zero:
+
+```text
+previous rate mode = NONE
+previous principal = 0 DAI
+balanceIncrease    = 0 DAI
+new borrow         = 500 DAI
+updated principal  = 0 + 0 + 500 = 500 DAI
+```
+
+There is no old Alice principal to remove from either debt aggregate. The selected mode is `VARIABLE`, so the complete updated position is added to the variable aggregate:
+
+```text
+totalBorrowsStable   = 0 DAI
+totalBorrowsVariable = 5,000 + 500
+                     = 5,500 DAI
+```
+
+The stored variable total increases by exactly the new `500 DAI` loan. It does not maintain a weighted average rate because all variable positions use the common reserve variable-borrow index.
+
+### 3. `_updateUserStateOnBorrow()` creates Alice's variable position
+
+Because Alice selected `VARIABLE`, `_updateUserStateOnBorrow()` clears her stable rate and stores the reserve's **newly checkpointed** variable-borrow index as her starting point. It then records the principal, fee, and timestamp:
+
+```text
+Alice stableBorrowRate                   = 0
+Alice lastVariableBorrowCumulativeIndex  ≈ 1.105170918
+Alice principalBorrowBalance             = 0 + 500 + 0 = 500 DAI
+Alice originationFee                     = 0 + 5 = 5 DAI
+Alice lastUpdateTimestamp                = block.timestamp
+```
+
+Saving `1.105170918` is essential: it means Alice's future variable debt starts at the index after the past year was checkpointed. A later balance calculation scales her `500 DAI` only by index growth **after this borrow**, so Bob's earlier year of interest is not charged to Alice.
+
+### 4. `_updateReserveInterestRatesAndTimestamp()` prices the post-borrow reserve
+
+The underlying transfer has not happened yet. `getReserveAvailableLiquidity()` still sees `10,000 DAI` in the core, so `_updateReserveInterestRatesAndTimestamp()` passes the pending `500 DAI` transfer as `_liquidityTaken` to price the post-borrow state:
+
+```text
+liquidity supplied to strategy = 10,000 + 0 - 500 = 9,500 DAI
+strategy inputs                = 9,500 DAI liquidity,
+                                 0 DAI stable debt,
+                                 5,500 DAI variable debt,
+                                 0 average stable rate
+```
+
+The actual rates come from the reserve's configured strategy. For a `MockReserveInterestRateStrategy` example, suppose it is preset to return:
+
+```text
+new liquidity rate       = 3% = 3e25 ray
+new stable borrow rate   = 6% = 6e25 ray
+new variable borrow rate = 7% = 7e25 ray
+```
+
+The core stores these values and sets `reserve.lastUpdateTimestamp` to `block.timestamp`. Finally, `_getUserCurrentBorrowRate()` sees Alice's `VARIABLE` mode and returns the reserve's newly stored variable rate:
+
+```text
+user borrow rate = 7% = 7e25 ray
+balanceIncrease  = 0 DAI
+```
+
+The old `10%` variable rate was used only to checkpoint the year before Alice borrowed. The new `7%` rate applies to variable borrowing from this point onward, including Alice's position. `LendingPool` then transfers `500 DAI` to Alice, leaving the core with `9,500 DAI`, the same liquidity amount used to calculate the new rates.
+
+## Worked Example: an Additional Stable Borrow
+
+This example follows the same entry point when Alice already has stable debt and takes an additional stable loan. Amounts are shown in DAI and rates are simplified annual rates; the contract stores rates and indexes in ray precision.
+
+Alice has `1,000 DAI` of stable debt at her personal `8%` stable rate. Her position and the reserve were last updated one year ago. The reserve has `5,000 DAI` of stored stable debt, including Alice's `1,000 DAI`, and its weighted average stable borrow rate is `7%`. The current stable rate offered by the reserve is `9%`. Alice borrows another `500 DAI` in stable mode and pays a `5 DAI` origination fee.
+
+```text
+Call:
+updateStateOnBorrow(DAI, Alice, 500 DAI, 5 DAI, STABLE)
+
+Before:
+Alice principalBorrowBalance             = 1,000 DAI
+Alice stableBorrowRate                   = 8%
+Alice lastUpdateTimestamp                = one year ago
+Alice lastVariableBorrowCumulativeIndex  = 0
+
+reserve liquidity index                  = 1.00
+reserve variable borrow index            = 1.00
+reserve lastUpdateTimestamp              = one year ago
+reserve currentLiquidityRate             = 5%
+reserve currentStableBorrowRate          = 9%
+reserve currentVariableBorrowRate        = 10%
+reserve totalBorrowsStable               = 5,000 DAI
+reserve totalBorrowsVariable             = 0 DAI
+reserve currentAverageStableBorrowRate   = 7%
+core's DAI balance                       = 10,000 DAI
+```
+
+### 1. `getUserBorrowBalances()` accrues Alice's personal stable rate
+
+`getUserBorrowBalances(DAI, Alice)` is a view call, so it does not write storage. A stable borrower does **not** use the reserve variable-borrow index. Instead, `CoreLibrary.getCompoundedBorrowBalance()` compounds Alice's stored principal using her own stored `stableBorrowRate` and her own `lastUpdateTimestamp`:
+
+```text
+stable interest factor  = (1 + 8% per year) ^ 1 year
+                        ≈ 1.083287068
+
+compounded balance      = 1,000 × 1.083287068
+                        ≈ 1,083.287068 DAI
+balanceIncrease         ≈ 1,083.287068 - 1,000
+                        ≈    83.287068 DAI
+```
+
+Thus `updateStateOnBorrow()` receives a stored principal of `1,000 DAI` and a `balanceIncrease` of approximately `83.287068 DAI`. The reserve's current `9%` stable rate does not retroactively change this result: Alice's old debt accrued at the `8%` rate locked into her position.
+
+### 2. `_updateReserveStateOnBorrow()` checkpoints the reserve and updates stable debt
+
+`_updateReserveStateOnBorrow()` first calls `updateCumulativeIndexes()`. Because the reserve has outstanding debt, this checkpoints its shared indexes using the old reserve-wide rates:
+
+```text
+liquidity index       = 1.00 × (1 + 5%)    = 1.05
+variable borrow index = 1.00 × 1.105170918 ≈ 1.105170918
+```
+
+The variable index advances even though Alice is stable because `updateCumulativeIndexes()` is reserve-wide and the reserve has total borrows. It does not affect Alice's stable balance; stable debt is accrued from each user's stored rate and timestamp. These indexes must be checkpointed before the new borrow changes liquidity and the strategy sets future rates.
+
+Next, `_updateReserveTotalBorrowsByRateMode()` identifies Alice's previous mode as `STABLE`. It removes her old `1,000 DAI` principal from the stable aggregate and recalculates the average rate of the remaining stable debt:
+
+```text
+remaining stable debt = 5,000 - 1,000 = 4,000 DAI
+
+remaining average rate = (5,000 × 7% - 1,000 × 8%) / 4,000
+                       = 6.75%
+```
+
+The helper then calculates Alice's complete updated debt and adds it to the stable aggregate at the reserve's current `9%` stable rate:
+
+```text
+updated principal = 1,000 + 83.287068 + 500
+                  ≈ 1,583.287068 DAI
+
+totalBorrowsStable = 4,000 + 1,583.287068
+                   ≈ 5,583.287068 DAI
+
+new average stable rate =
+    (4,000 × 6.75% + 1,583.287068 × 9%) / 5,583.287068
+    ≈ 7.388046%
+```
+
+The total stable debt increases by approximately `583.287068 DAI`: Alice's materialized interest plus her new `500 DAI` loan. Removing her old principal first prevents it from being counted twice.
+
+### 3. `_updateUserStateOnBorrow()` records Alice's new stable position
+
+Because Alice selected `STABLE`, the helper replaces her old `8%` rate with the reserve's current `9%` stable rate. It clears her variable-index checkpoint, materializes the accrued interest into principal, adds the fee, and writes the timestamp:
+
+```text
+Alice stableBorrowRate                   = 9%
+Alice lastVariableBorrowCumulativeIndex  = 0
+Alice principalBorrowBalance             ≈ 1,583.287068 DAI
+Alice originationFee                     += 5 DAI
+Alice lastUpdateTimestamp                = block.timestamp
+```
+
+The `9%` rate applies to Alice's complete updated stable balance from this point onward. Her prior year remains accounted for at `8%`.
+
+### 4. `_updateReserveInterestRatesAndTimestamp()` sets rates for future actions
+
+The underlying tokens have not yet been transferred. The strategy receives the post-borrow projected liquidity and the new debt totals:
+
+```text
+liquidity supplied to strategy = 10,000 - 500 = 9,500 DAI
+strategy inputs                = 9,500 DAI liquidity,
+                                 5,583.287068 DAI stable debt,
+                                 0 DAI variable debt,
+                                 7.388046% average stable rate
+```
+
+The concrete rates depend on the configured strategy. For a `MockReserveInterestRateStrategy` example, suppose it is preset to return:
+
+```text
+new liquidity rate       = 4%  = 4e25 ray
+new stable borrow rate   = 10% = 10e25 ray
+new variable borrow rate = 11% = 11e25 ray
+```
+
+The core stores those three values and sets `reserve.lastUpdateTimestamp` to `block.timestamp`. They apply to the reserve from now on.
+
+Finally, `_getUserCurrentBorrowRate()` sees Alice's `STABLE` mode and returns **her stored stable rate**, not the reserve's newly returned `10%` stable rate. Therefore this `updateStateOnBorrow()` call returns:
+
+```text
+user borrow rate = 9% = 9e25 ray
+balanceIncrease  ≈ 83.287068 DAI
+```
+
+The `10%` rate is offered to later stable borrows; Alice's updated position remains at `9%` unless another operation changes it. `LendingPool` then transfers her `500 DAI`.
+
+## Worked Example: an Additional Variable Borrow
+
+The following example follows every call made by `updateStateOnBorrow()` for one transaction. Amounts are shown in DAI and rates are simplified annual rates; the contract stores rates and indexes in ray precision.
+
+Alice already has `1,000 DAI` of variable debt. Her debt was last materialized a year ago, when the variable-borrow index was `1.00`. The reserve has not been updated since then. During that year, its old liquidity rate is `5%` and its old variable-borrow rate is `10%`. Alice now borrows another `500 DAI` in variable mode with a `5 DAI` origination fee. The core currently holds `10,000 DAI` of liquid DAI; the reserve has no stable debt and its stored variable debt total is `5,000 DAI`, including Alice's stored `1,000 DAI` principal.
+
+```text
+Call:
+updateStateOnBorrow(DAI, Alice, 500 DAI, 5 DAI, VARIABLE)
+
+Before:
+Alice principalBorrowBalance             = 1,000 DAI
+Alice lastVariableBorrowCumulativeIndex  = 1.00
+reserve liquidity index                  = 1.00
+reserve variable borrow index            = 1.00
+reserve lastUpdateTimestamp              = one year ago
+reserve currentLiquidityRate             = 5%
+reserve currentVariableBorrowRate        = 10%
+reserve totalBorrowsVariable             = 5,000 DAI
+core's DAI balance                       = 10,000 DAI
+```
+
+### 1. `getUserBorrowBalances()` reads Alice's debt including accrued interest
+
+`getUserBorrowBalances(DAI, Alice)` is a view call, so it does not change storage. Because Alice is a variable borrower, `CoreLibrary.getCompoundedBorrowBalance()` first calculates the index's growth from `lastUpdateTimestamp` to the current block using the old `10%` variable rate. It then scales Alice's stored principal by that current, not-yet-stored index:
+
+```text
+current variable index = 1.00 × 1.105170918 = 1.105170918
+
+compounded balance = 1,000 × 1.105170918 / 1.00
+                   ≈ 1,105.170918 DAI
+balanceIncrease    ≈ 1,105.170918 - 1,000
+                   ≈   105.170918 DAI
+```
+
+So `updateStateOnBorrow()` receives `principalBorrowBalance = 1,000 DAI` and `balanceIncrease ≈ 105.170918 DAI`. That accrued interest is still only calculated at this point; the later helpers write it into reserve and user state.
+
+### 2. `_updateReserveStateOnBorrow()` updates indexes and reserve debt totals
+
+This helper first calls `updateCumulativeIndexes()`. Unlike the preceding view calculation, this call writes the year of interest into the reserve's stored indexes, still using the old rates:
+
+```text
+liquidity index       = 1.00 × (1 + 5%)    = 1.05
+variable borrow index = 1.00 × 1.105170918 ≈ 1.105170918
+```
+
+The variable index now equals the effective current index used to calculate Alice's `balanceIncrease` in step 1. This is why `_updateUserStateOnBorrow()` can safely store `1.105170918` as Alice's next variable-debt checkpoint. Checkpointing happens before the new borrow changes debt totals, removes liquidity, and causes new rates to be calculated for future time.
+
+It then calls `_updateReserveTotalBorrowsByRateMode()`. Alice's previous mode is `VARIABLE`, so the helper removes her old stored principal from the variable total, calculates her complete updated principal, and adds it back to the selected variable bucket:
+
+```text
+updated principal = 1,000 + 105.170918 + 500
+                  ≈ 1,605.170918 DAI
+
+totalBorrowsVariable = 5,000 - 1,000 + 1,605.170918
+                     ≈ 5,605.170918 DAI
+```
+
+The increase is approximately `605.170918 DAI`: the materialized interest plus the `500 DAI` of new debt. Separating the removal and addition avoids counting Alice's old `1,000 DAI` twice.
+
+### 3. `_updateUserStateOnBorrow()` checkpoints Alice's new position
+
+Because the selected mode is `VARIABLE`, this helper clears Alice's stable rate and records the reserve's current variable-borrow index as her new checkpoint. It also materializes the interest into principal, accumulates the fee, and writes the timestamp:
+
+```text
+Alice stableBorrowRate                   = 0
+Alice lastVariableBorrowCumulativeIndex  ≈ 1.105170918
+Alice principalBorrowBalance             ≈ 1,605.170918 DAI
+Alice originationFee                     += 5 DAI
+Alice lastUpdateTimestamp                = block.timestamp
+```
+
+From now on, interest on approximately `1,605.170918 DAI` is measured relative to index `1.105170918`.
+
+### 4. `_updateReserveInterestRatesAndTimestamp()` prices the liquidity removal
+
+The tokens have not yet been transferred: `LendingPool` calls `transferToUser()` only after this function returns. `getReserveAvailableLiquidity()` therefore still reads the core's `10,000 DAI` balance. The helper compensates by passing `_liquidityTaken = 500 DAI` to the interest-rate strategy:
+
+```text
+liquidity supplied to strategy = 10,000 + 0 - 500 = 9,500 DAI
+strategy inputs                = 9,500 DAI liquidity, 0 DAI stable debt,
+                                 5,605.170918 DAI variable debt, current average stable rate
+```
+
+`calculateInterestRates()` returns the new liquidity, stable-borrow, and variable-borrow rates for that post-borrow state. The core stores all three rates, sets `reserve.lastUpdateTimestamp`, and emits `ReserveUpdated`.
+
+### Example strategy response and returned user rate
+
+The concrete rates depend on the reserve's configured strategy. The test strategy in this repository, `MockReserveInterestRateStrategy`, is configurable: it returns preset values and does not derive them from the inputs above. For example, suppose it is configured to return:
+
+```text
+new liquidity rate       = 3% = 3e25 ray
+new stable borrow rate   = 6% = 6e25 ray
+new variable borrow rate = 7% = 7e25 ray
+```
+
+For the post-borrow inputs above, its return value is therefore:
+
+```solidity
+(3e25, 6e25, 7e25)
+```
+
+`_updateReserveInterestRatesAndTimestamp()` stores those values:
+
+```text
+reserve.currentLiquidityRate       = 3%
+reserve.currentStableBorrowRate    = 6%
+reserve.currentVariableBorrowRate  = 7%
+reserve.lastUpdateTimestamp        = block.timestamp
+```
+
+Finally, `_getUserCurrentBorrowRate()` sees that Alice's position is in `VARIABLE` mode and returns `reserve.currentVariableBorrowRate`. In this example, `updateStateOnBorrow()` therefore returns a user borrow rate of `7%` (`7e25 ray`) and the earlier approximately `105.170918 DAI` `balanceIncrease`.
+
+The old `10%` variable rate is used only to accrue the year before Alice's borrow. The new `7%` rate applies from this borrow onward. `LendingPool` then transfers the `500 DAI` to Alice, making the core's actual DAI balance match the `9,500 DAI` liquidity used for repricing.
+
+## Worked Example: Switch From Stable Debt to Variable Debt After Time Has Passed
+
+This example follows a borrower who already has stable debt and takes a new variable-rate borrow. In this implementation, the new borrow rate mode applies to the user's **complete updated debt position**. Therefore Alice's old stable principal, its accrued stable interest, and the new amount all leave the stable aggregate and enter the variable aggregate.
+
+Amounts are shown in DAI and rates are simplified annual rates; the contract stores rates and indexes in ray precision. Alice has `1,000 DAI` of stable debt at her personal `8%` stable rate. Her position and the reserve were last updated one year ago. The reserve's `5,000 DAI` stable-debt total includes Alice's stored `1,000 DAI`; its average stable rate is `7%`. Other borrowers have `2,000 DAI` of variable debt. Alice now borrows another `500 DAI` in variable mode and pays a `5 DAI` origination fee.
+
+```text
+Call:
+updateStateOnBorrow(DAI, Alice, 500 DAI, 5 DAI, VARIABLE)
+
+Before:
+Alice principalBorrowBalance             = 1,000 DAI
+Alice stableBorrowRate                   = 8%
+Alice lastUpdateTimestamp                = one year ago
+Alice lastVariableBorrowCumulativeIndex  = 0
+
+reserve liquidity index                  = 1.00
+reserve variable borrow index            = 1.00
+reserve lastUpdateTimestamp              = one year ago
+reserve currentLiquidityRate             = 5%
+reserve currentStableBorrowRate          = 9%
+reserve currentVariableBorrowRate        = 10%
+reserve totalBorrowsStable               = 5,000 DAI
+reserve totalBorrowsVariable             = 2,000 DAI
+reserve currentAverageStableBorrowRate   = 7%
+core's DAI balance                       = 10,000 DAI
+```
+
+### 1. `getUserBorrowBalances()` accrues Alice's old stable position
+
+`getUserBorrowBalances(DAI, Alice)` is a view call, so it writes nothing. Alice's current mode is `STABLE`, because her stored principal is nonzero and `stableBorrowRate` is `8%`. Her old debt compounds using her personal stable rate and her own debt timestamp, rather than the reserve variable-borrow index:
+
+```text
+stable interest factor  = (1 + 8% per year) ^ 1 year
+                        ≈ 1.083287068
+
+compounded balance      = 1,000 × 1.083287068
+                        ≈ 1,083.287068 DAI
+balanceIncrease         ≈ 1,083.287068 - 1,000
+                        ≈    83.287068 DAI
+```
+
+Thus the outer function receives `principalBorrowBalance = 1,000 DAI` and `balanceIncrease ≈ 83.287068 DAI`. The reserve's old `10%` variable rate does not affect Alice's past year: until this transaction, her entire position was stable at `8%`.
+
+### 2. `_updateReserveStateOnBorrow()` checkpoints indexes and moves the complete position
+
+First, `_updateReserveStateOnBorrow()` calls `updateCumulativeIndexes()`. The reserve has outstanding stable and variable debt, so its shared indexes record the elapsed year using the old reserve-wide rates:
+
+```text
+liquidity index       = 1.00 × (1 + 5%)    = 1.05
+variable borrow index = 1.00 × 1.105170918 ≈ 1.105170918
+```
+
+The liquidity index accounts for supplier income. The variable index accounts for the pre-existing variable borrowers' debt growth. Alice is still a stable borrower during this checkpoint, so the variable index does not calculate her prior `83.287068 DAI` of interest; that amount came from her own `8%` stable rate in step 1.
+
+The helper then calls `_updateReserveTotalBorrowsByRateMode()`. Alice's previous mode is `STABLE`, so it first removes her **stored** `1,000 DAI` principal from the stable aggregate and removes its `8%` weight from the stable average:
+
+```text
+remaining stable debt = 5,000 - 1,000 = 4,000 DAI
+
+remaining average stable rate =
+    (5,000 × 7% - 1,000 × 8%) / 4,000
+    = 6.75%
+```
+
+It then builds Alice's complete updated position and, because the selected new mode is `VARIABLE`, adds that position to the variable aggregate:
+
+```text
+updated principal = 1,000 + 83.287068 + 500
+                  ≈ 1,583.287068 DAI
+
+totalBorrowsStable   = 4,000 DAI
+totalBorrowsVariable = 2,000 + 1,583.287068
+                     ≈ 3,583.287068 DAI
+```
+
+The two aggregate totals together increase by only `583.287068 DAI`: Alice's materialized stable interest plus the new `500 DAI`. Her original `1,000 DAI` is moved, not duplicated. `currentAverageStableBorrowRate` remains `6.75%`, because Alice's complete updated position now belongs to the variable bucket.
+
+### 3. `_updateUserStateOnBorrow()` converts Alice's position to variable mode
+
+Because the selected mode is `VARIABLE`, `_updateUserStateOnBorrow()` clears the old stable rate and saves the reserve's newly checkpointed variable index as Alice's starting index. It also materializes her prior stable interest into principal, adds the new loan and fee, and updates her timestamp:
+
+```text
+Alice stableBorrowRate                   = 0
+Alice lastVariableBorrowCumulativeIndex  ≈ 1.105170918
+Alice principalBorrowBalance             ≈ 1,583.287068 DAI
+Alice originationFee                     += 5 DAI
+Alice lastUpdateTimestamp                = block.timestamp
+```
+
+This is the mode-switch boundary. Alice's preceding year has already been charged at `8%` and included in her principal. From this block onward, her complete `1,583.287068 DAI` position grows relative to index `1.105170918`, using the reserve's variable rate from future time.
+
+### 4. `_updateReserveInterestRatesAndTimestamp()` prices the post-switch borrow
+
+`LendingPool` has not transferred the `500 DAI` yet. The core still holds `10,000 DAI`, so `_updateReserveInterestRatesAndTimestamp()` subtracts the pending transfer through `_liquidityTaken` when it calls the strategy:
+
+```text
+liquidity supplied to strategy = 10,000 + 0 - 500 = 9,500 DAI
+strategy inputs                = 9,500 DAI liquidity,
+                                 4,000 DAI stable debt,
+                                 3,583.287068 DAI variable debt,
+                                 6.75% average stable rate
+```
+
+For a `MockReserveInterestRateStrategy` example, suppose the strategy is preset to return:
+
+```text
+new liquidity rate       = 3% = 3e25 ray
+new stable borrow rate   = 6% = 6e25 ray
+new variable borrow rate = 7% = 7e25 ray
+```
+
+The core stores these future reserve rates and sets `reserve.lastUpdateTimestamp` to `block.timestamp`. `_getUserCurrentBorrowRate()` now sees that Alice is in `VARIABLE` mode, so it returns the newly stored reserve variable rate:
+
+```text
+user borrow rate = 7% = 7e25 ray
+balanceIncrease  ≈ 83.287068 DAI
+```
+
+The old `10%` variable rate was used only to checkpoint existing variable borrowers through the past year. The new `7%` variable rate applies to Alice after her switch; it does not alter the prior year of `8%` stable accrual. `LendingPool` then transfers Alice's newly borrowed `500 DAI`, leaving `9,500 DAI` in core liquidity.
+
+## Worked Example: Switch From Variable Debt to Stable Debt After Time Has Passed
+
+This is the reciprocal mode switch. Alice already has variable debt and takes a new stable-rate borrow after one year. The variable index first materializes the interest on her old variable position. Then the helper moves Alice's complete updated debt from the variable aggregate into the stable aggregate, where it receives the reserve's currently offered stable rate.
+
+Amounts are shown in DAI and rates are simplified annual rates; the contract stores rates and indexes in ray precision. Alice has `1,000 DAI` of variable debt, recorded when the variable-borrow index was `1.00`. Her position and the reserve were last updated one year ago. The reserve's `5,000 DAI` variable-debt total includes Alice's stored `1,000 DAI`; other borrowers have `2,000 DAI` of stable debt at a `7%` average stable rate. Alice now borrows another `500 DAI` in stable mode and pays a `5 DAI` origination fee.
+
+```text
+Call:
+updateStateOnBorrow(DAI, Alice, 500 DAI, 5 DAI, STABLE)
+
+Before:
+Alice principalBorrowBalance             = 1,000 DAI
+Alice stableBorrowRate                   = 0
+Alice lastUpdateTimestamp                = one year ago
+Alice lastVariableBorrowCumulativeIndex  = 1.00
+
+reserve liquidity index                  = 1.00
+reserve variable borrow index            = 1.00
+reserve lastUpdateTimestamp              = one year ago
+reserve currentLiquidityRate             = 5%
+reserve currentStableBorrowRate          = 9%
+reserve currentVariableBorrowRate        = 10%
+reserve totalBorrowsStable               = 2,000 DAI
+reserve totalBorrowsVariable             = 5,000 DAI
+reserve currentAverageStableBorrowRate   = 7%
+core's DAI balance                       = 10,000 DAI
+```
+
+### 1. `getUserBorrowBalances()` materializes Alice's old variable interest in memory
+
+`getUserBorrowBalances(DAI, Alice)` is a view call. Alice's principal is nonzero and her `stableBorrowRate` is zero, so `getUserCurrentBorrowRateMode()` identifies her as a `VARIABLE` borrower. `CoreLibrary.getCompoundedBorrowBalance()` calculates the current variable index in memory using the old `10%` variable rate, then scales Alice's principal from her saved `1.00` checkpoint:
+
+```text
+current variable index = 1.00 × 1.105170918
+                       = 1.105170918
+
+compounded balance = 1,000 × 1.105170918 / 1.00
+                   ≈ 1,105.170918 DAI
+balanceIncrease    ≈ 1,105.170918 - 1,000
+                   ≈   105.170918 DAI
+```
+
+At this stage nothing has been written. The outer function receives Alice's stored `1,000 DAI` principal and the approximately `105.170918 DAI` of variable interest that must be materialized as part of the switch.
+
+### 2. `_updateReserveStateOnBorrow()` checkpoints the reserve and moves Alice's debt
+
+`_updateReserveStateOnBorrow()` first calls `updateCumulativeIndexes()`. Since the reserve has outstanding debt, it writes the elapsed year's growth using the old rates:
+
+```text
+liquidity index       = 1.00 × (1 + 5%)    = 1.05
+variable borrow index = 1.00 × 1.105170918 ≈ 1.105170918
+```
+
+The stored variable index now matches the in-memory index from step 1. This locks in the past year for Alice and the other variable borrowers before Alice's switch changes the debt mix and before the strategy sets new rates.
+
+Next, `_updateReserveTotalBorrowsByRateMode()` sees Alice's previous `VARIABLE` mode. It removes only her old stored `1,000 DAI` principal from `totalBorrowsVariable`; variable debt does not require an average-rate adjustment:
+
+```text
+remaining variable debt = 5,000 - 1,000 = 4,000 DAI
+```
+
+The helper then calculates Alice's complete updated debt and adds it to the selected `STABLE` bucket at the reserve's current `9%` stable rate:
+
+```text
+updated principal = 1,000 + 105.170918 + 500
+                  ≈ 1,605.170918 DAI
+
+totalBorrowsVariable = 4,000 DAI
+totalBorrowsStable   = 2,000 + 1,605.170918
+                     ≈ 3,605.170918 DAI
+
+new average stable rate =
+    (2,000 × 7% + 1,605.170918 × 9%) / 3,605.170918
+    ≈ 7.8905%
+```
+
+The reserve's total debt increases by approximately `605.170918 DAI`: Alice's materialized variable interest plus her new `500 DAI` loan. Her old `1,000 DAI` is transferred from the variable bucket to the stable bucket rather than counted twice.
+
+### 3. `_updateUserStateOnBorrow()` converts Alice's position to stable mode
+
+The selected mode is `STABLE`, so `_updateUserStateOnBorrow()` stores the reserve's current `9%` stable rate and clears Alice's variable-index checkpoint. It adds the previously calculated interest and new amount into principal, adds the fee, and writes the new timestamp:
+
+```text
+Alice stableBorrowRate                   = 9%
+Alice lastVariableBorrowCumulativeIndex  = 0
+Alice principalBorrowBalance             ≈ 1,605.170918 DAI
+Alice originationFee                     += 5 DAI
+Alice lastUpdateTimestamp                = block.timestamp
+```
+
+The mode switch is now complete. Alice's past year is included in her principal at the old variable rate, while her entire updated principal will accrue from this timestamp at her newly stored `9%` stable rate. The reserve variable index no longer applies to Alice's debt.
+
+### 4. `_updateReserveInterestRatesAndTimestamp()` prices the post-switch state
+
+The underlying transfer still has not occurred. `getReserveAvailableLiquidity()` returns the core's actual `10,000 DAI` balance, so the helper subtracts the pending `500 DAI` through `_liquidityTaken` when calling the interest-rate strategy:
+
+```text
+liquidity supplied to strategy = 10,000 + 0 - 500 = 9,500 DAI
+strategy inputs                = 9,500 DAI liquidity,
+                                 3,605.170918 DAI stable debt,
+                                 4,000 DAI variable debt,
+                                 7.8905% average stable rate
+```
+
+For a `MockReserveInterestRateStrategy` example, suppose the strategy is preset to return:
+
+```text
+new liquidity rate       = 3% = 3e25 ray
+new stable borrow rate   = 6% = 6e25 ray
+new variable borrow rate = 7% = 7e25 ray
+```
+
+The core stores these rates and sets `reserve.lastUpdateTimestamp` to `block.timestamp`. Finally, `_getUserCurrentBorrowRate()` sees Alice's `STABLE` mode and returns her stored stable rate, not the strategy's new stable rate:
+
+```text
+user borrow rate = 9% = 9e25 ray
+balanceIncrease  ≈ 105.170918 DAI
+```
+
+The old `10%` variable rate was used only to accrue the year before the switch. The new `6%` stable rate is offered to later stable borrows; it does not change Alice's newly recorded `9%` rate. `LendingPool` then transfers `500 DAI` to Alice, leaving the core with `9,500 DAI` of liquid DAI.
+
 ## `_updateReserveStateOnBorrow`
 
 ```solidity
