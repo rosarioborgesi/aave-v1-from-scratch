@@ -1976,6 +1976,15 @@ For a user without debt, all three values are zero. Otherwise, the function uses
 balanceIncrease = compoundedBorrowBalance - principalBorrowBalance
 ```
 
+For example, if the user's last stored debt update recorded `1,000 DAI` of principal and interest
+has grown that debt to `1,020 DAI`, the getter returns:
+
+```text
+principalBorrowBalance  = 1,000 DAI
+compoundedBorrowBalance = 1,020 DAI
+balanceIncrease         =    20 DAI
+```
+
 This getter does not write state. `updateStateOnBorrow()` uses it to materialize the returned `balanceIncrease` into both the reserve totals and the user's stored principal before adding a new loan.
 
 ## `getUserCurrentBorrowRateMode`
@@ -2015,14 +2024,22 @@ First, stable borrowing must be enabled for the reserve:
 reserve.isStableBorrowRateEnabled
 ```
 
-If it is enabled, the function rejects only the following combination:
+If it is enabled, the same-asset stable-borrow restriction passes when at least one condition is true:
+
+1. The user is not using this reserve as collateral.
+2. This reserve is not enabled for collateral use.
+3. The requested stable borrow exceeds the user's underlying balance of this asset.
+
+When the user is using this collateral-enabled reserve, a same-asset stable borrow is allowed only when its amount exceeds that user's current underlying deposit balance. The balance is read through the aToken, so accrued deposit interest is included.
+
+### Example: stable borrowing against the same asset
+
+Alice deposits `1,000 DAI` and enables DAI as collateral. If she then requests a `500 DAI` stable-rate borrow, this condition holds:
 
 ```text
-the user has this reserve enabled as collateral
-AND the reserve type supports collateral
-AND the requested stable borrow is less than or equal to the user's current deposit of that same asset
+500 DAI <= 1,000 DAI
 ```
 
-Equivalently, a same-asset stable borrow is allowed only when its amount exceeds that user's current underlying deposit balance. The balance is read through the aToken, so accrued deposit interest is included.
+The function returns `false`: Alice is attempting a stable borrow of the same asset she is using as collateral, and the requested amount does not exceed her DAI balance. If Alice instead borrows another asset, such as USDC, her DAI deposit is not used by this specific same-asset check.
 
 This is not the complete stable-borrow validation. `LendingPool` also checks the stable borrowing cap relative to available liquidity, alongside the general borrow validations such as collateral capacity and available liquidity.
