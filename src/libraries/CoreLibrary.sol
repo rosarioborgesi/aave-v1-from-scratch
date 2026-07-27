@@ -238,6 +238,7 @@ library CoreLibrary {
         uint256 totalBorrows = getTotalBorrows(_self);
 
         if (totalBorrows > 0) {
+            // TODO Add the formulas here
             // Only cumulating of there is any income being produced
             uint256 cumulatedLiquidityInterest =
                 calculateLinearInterest(_self.currentLiquidityRate, _self.lastUpdateTimestamp);
