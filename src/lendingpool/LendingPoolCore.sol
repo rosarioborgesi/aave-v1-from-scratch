@@ -581,7 +581,6 @@ contract LendingPoolCore {
         user.principalBorrowBalance += _amountBorrowed + _balanceIncrease;
 
         // Update the origination fee
-        // TODO what is origination fee? Explain it in the docs
         user.originationFee += _fee;
 
         // Update the timestamp
@@ -797,13 +796,8 @@ contract LendingPoolCore {
      *
      */
     function getUserBorrowBalances(address _reserve, address _user) public view returns (uint256, uint256, uint256) {
-        // Read user's reserve data
         CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
 
-        // Read the stored principal
-        // The principal is the debt stored during the user's last borro-related action.
-        // It includes interest that had already been materialized during previous actions, but not
-        // interest accrued since the last update
         uint256 principal = user.principalBorrowBalance;
 
         // Handles users without debt
@@ -816,12 +810,7 @@ contract LendingPoolCore {
         // This is a view calculation, it doesn't updated storage
         uint256 compoundedBalance = CoreLibrary.getCompoundedBorrowBalance(user, s_reserves[_reserve]);
 
-        // Calculate the balance increase = compoundedBalance - principal
-
-        // Example
-        // principal: 1,000 DAI
-        // compounded balance: 1,020 DAI
-        // balance increase: 20 DAI
+        // Balance increase = compoundedBalance - principal
         return (principal, compoundedBalance, compoundedBalance - principal);
     }
 
@@ -868,22 +857,10 @@ contract LendingPoolCore {
             return false;
         }
 
-        // Borrowing is allowed if:
-        // 1. The user is not using this reserve as collateral
-        // 2. The reserve cannot be used as collateral
-        // 3. The amount being borrowed is greater than the user's balance of the same asset.
-
-        // Stable borrowing is rejected only when all three are true:
-        // - The user uses the reserve as collateral.
-        // - The reserve is enabled as collateral
-        // - The requested borrow is less than or equal to the user's balance of that asser
-
-        // Example
-        // Alice deposited 1,000 DAI and enabled is as collateral
-        // If she attempts to borrow 500 DAI at a stable rate:
-        // 500 DAI <= 1,000 DAI
-        // The function returns false because Alice would be borrowing the same asset that she is using as collateral.
-        // If Alice instead borrows another asset, such as USDC, her DAI deposit is irrelevant to this specific check.
+        // The same-asset stable-borrow restriction passes when at least one condition is true:
+        // 1. The user is not using this reserve as collateral.
+        // 2. This reserve is not enabled for collateral use.
+        // 3. The requested stable borrow exceeds the user's underlying balance of this asset.
         return !user.useAsCollateral || !reserve.usageAsCollateralEnabled
             || _amount > getUserUnderlyingAssetBalance(_reserve, _user);
     }
