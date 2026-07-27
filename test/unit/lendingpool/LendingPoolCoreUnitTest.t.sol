@@ -60,6 +60,18 @@ contract LendingPoolCoreHarness is LendingPoolCore {
         s_reserves[_reserve].lastUpdateTimestamp = _timestamp;
     }
 
+    function setReserveBorrowingEnabled(address _reserve, bool _borrowingEnabled) external {
+        s_reserves[_reserve].borrowingEnabled = _borrowingEnabled;
+    }
+
+    function setReserveStableBorrowRateEnabled(address _reserve, bool _stableBorrowRateEnabled) external {
+        s_reserves[_reserve].isStableBorrowRateEnabled = _stableBorrowRateEnabled;
+    }
+
+    function setReserveDecimals(address _reserve, uint256 _decimals) external {
+        s_reserves[_reserve].decimals = _decimals;
+    }
+
     function setReserveConfiguration(
         address _reserve,
         uint256 _baseLTVasCollateral,
@@ -1137,6 +1149,9 @@ contract LendingPoolCoreUnitTest is Test {
         core.setReserveBorrows(address(token), 1_500 ether, 500 ether);
         core.setReserveCurrentAverageStableBorrowRate(address(token), 5e25);
         core.setReserveRates(address(token), 0, 5e25, 0);
+        // Seed the user's existing variable position: 100 tokens of principal at the initial
+        // variable index of 1 ray, a 2-token existing fee, and no stable rate. Collateral usage
+        // is deliberately true so the test can show that borrowing preserves this unrelated flag.
         core.setUserReserveData(
             user,
             address(token),
@@ -2012,5 +2027,859 @@ contract LendingPoolCoreUnitTest is Test {
         assertEq(reserve.totalBorrowsStable, 115 ether);
         // The first stable position defines the stable-debt average rate.
         assertEq(reserve.currentAverageStableBorrowRate, stableBorrowRate);
+    }
+
+    ////////////////////////////////
+    //      updateStateOnBorrow    //
+    ////////////////////////////////
+
+    // Scenario: a user with no existing debt takes their first stable-rate borrow. (`NONE` -> `STABLE`)
+    //
+    // A first stable borrow updates both reserve and user state, reprices the reserve
+    // using the pending liquidity removal, and returns the user's stable borrow rate.
+    function testUpdateStateOnBorrowFirstStableBorrowUpdatesStateAndReturnsStableRate()
+        external
+        withInitReserve(address(token))
+    {
+        // The core core holds 1,000 tokens before the user borrows.
+        uint256 availableLiquidity = 1_000 ether;
+        // The user takes a first loan of 100 DAI and pays a separate 2 DAI origination fee.
+        uint256 amountBorrowed = 100 ether;
+        uint256 borrowFee = 2 ether;
+        // The strategy will provide these new reserve-wide rates after the borrow is recorded.
+        uint256 liquidityRate = 3e25; // 3%
+        uint256 stableBorrowRate = 6e25; // 6%
+        uint256 variableBorrowRate = 7e25; // 7%
+        // Use a known timestamp so the test can verify the reserve and user checkpoints.
+        uint256 updateTimestamp = block.timestamp + 30 days;
+
+        // Mint the liquidity now so getReserveAvailableLiquidity() can see the pre-borrow balance.
+        token.mint(address(core), availableLiquidity);
+
+        // Stable debt is priced at the rate offered before the strategy reprices the reserve.
+        // _updateUserStateOnBorrow copies this existing 6% rate to the user's position. The
+        // strategy's rate is only stored later for future stable borrows.
+        core.setReserveRates(address(token), 0, stableBorrowRate, 0);
+
+        // Configure the mock strategy response that _updateReserveInterestRatesAndTimestamp()
+        // should save after the borrow has updated the debt totals.
+        strategy.setRates(liquidityRate, stableBorrowRate, variableBorrowRate);
+
+        // Move time forward so both the reserve and the user's last-update timestamps are
+        // meaningful assertions. No old debt or rates exist, so no interest is accrued.
+        vm.warp(updateTimestamp);
+
+        // The underlying tokens have not yet been transferred to the borrower. Therefore the
+        // core starts from 1,000 DAI of actual liquidity and subtracts the pending 100 DAI
+        // transfer before asking the strategy to price the reserve: 1,000 - 100 = 900 DAI.
+        // This first stable borrow also creates 100 DAI of stable debt, no variable debt, and
+        // a stable-debt average equal to the 6% rate assigned to this only stable position.
+        vm.expectCall(
+            address(strategy),
+            abi.encodeCall(
+                IReserveInterestRateStrategy.calculateInterestRates,
+                (address(token), availableLiquidity - amountBorrowed, amountBorrowed, 0, stableBorrowRate)
+            )
+        );
+
+        // With no prior borrow balances, the indexes remain at their initialized value of one
+        // ray. The emitted event contains those unchanged indexes and the strategy's new rates.
+        vm.expectEmit(true, false, false, true);
+        emit LendingPoolCore.ReserveUpdated(
+            address(token), liquidityRate, stableBorrowRate, variableBorrowRate, RAY, RAY
+        );
+
+        // Call the complete external borrow state-update flow as the LendingPool. This performs,
+        // in order: read the user's existing debt (zero), update reserve totals, store the user's
+        // new stable position, then reprice the reserve and return the user's borrow rate.
+        vm.prank(lendingPool);
+        (uint256 userBorrowRate, uint256 balanceIncrease) = core.updateStateOnBorrow(
+            address(token), user, amountBorrowed, borrowFee, CoreLibrary.InterestRateMode.STABLE
+        );
+
+        // Read both storage records after the full borrow flow has completed.
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        // This is the user's first borrow, so there is no old principal on which interest could
+        // have accrued. The returned borrow rate is the stable rate copied to the user position.
+        assertEq(userBorrowRate, stableBorrowRate);
+        assertEq(balanceIncrease, 0);
+
+        // The 100 DAI loan belongs entirely to stable debt. Since it is the only stable position,
+        // its 6% rate is also the reserve's weighted average stable borrow rate.
+        assertEq(reserve.totalBorrowsStable, amountBorrowed);
+        assertEq(reserve.totalBorrowsVariable, 0);
+        assertEq(reserve.currentAverageStableBorrowRate, stableBorrowRate);
+
+        // The reserve persists the rates returned by the strategy for the next interest period
+        // and records the timestamp at which those new rates start applying.
+        assertEq(reserve.currentLiquidityRate, liquidityRate);
+        assertEq(reserve.currentStableBorrowRate, stableBorrowRate);
+        assertEq(reserve.currentVariableBorrowRate, variableBorrowRate);
+        assertEq(reserve.lastUpdateTimestamp, updateTimestamp);
+
+        // The user's principal records only the borrowed amount. The origination fee is tracked
+        // separately, and a stable position stores its personal stable rate rather than a variable
+        // index. Finally, the user receives the same update timestamp as the reserve.
+        assertEq(userData.principalBorrowBalance, amountBorrowed);
+        assertEq(userData.originationFee, borrowFee);
+        assertEq(userData.stableBorrowRate, stableBorrowRate);
+        assertEq(userData.lastVariableBorrowCumulativeIndex, 0);
+        assertEq(userData.lastUpdateTimestamp, updateTimestamp);
+    }
+
+    // A first variable borrow updates both reserve and user state, reprices the reserve
+    // using the pending liquidity removal, and returns the reserve's variable borrow rate.
+    // Scenario: a user with no existing debt takes their first variable-rate borrow. (`NONE` -> `VARIABLE`)
+    function testUpdateStateOnBorrowFirstVariableBorrowUpdatesStateAndReturnsVariableRate()
+        external
+        withInitReserve(address(token))
+    {
+        // The core holds 1,000 tokens before the user borrows 100 tokens at a variable rate.
+        uint256 availableLiquidity = 1_000 ether;
+        uint256 amountBorrowed = 100 ether;
+        uint256 borrowFee = 2 ether;
+        // The strategy returns these new reserve-wide rates after the borrow is recorded.
+        uint256 liquidityRate = 3e25; // 3%
+        uint256 stableBorrowRate = 6e25; // 6%
+        uint256 variableBorrowRate = 7e25; // 7%
+        // Use a known timestamp so the test can verify the reserve and user checkpoints.
+        uint256 updateTimestamp = block.timestamp + 30 days;
+
+        // Mint the liquidity now so getReserveAvailableLiquidity() can see the pre-borrow balance.
+        token.mint(address(core), availableLiquidity);
+        // Configure the mock response that is stored after the new variable debt is accounted for.
+        strategy.setRates(liquidityRate, stableBorrowRate, variableBorrowRate);
+        // Move time forward. There are no old borrow totals or rates, so no interest accrues.
+        vm.warp(updateTimestamp);
+
+        // The underlying transfer happens only after this state update. Therefore the strategy
+        // receives 900 tokens of liquidity (1,000 held by the core minus the pending 100-token
+        // transfer), 100 tokens of variable debt, and no stable debt or stable-rate average.
+        vm.expectCall(
+            address(strategy),
+            abi.encodeCall(
+                IReserveInterestRateStrategy.calculateInterestRates,
+                (address(token), availableLiquidity - amountBorrowed, 0, amountBorrowed, 0)
+            )
+        );
+
+        // No prior debt means neither cumulative index grows; both remain at the initial 1 ray.
+        // The event therefore contains unchanged indexes and the rates returned by the strategy.
+        vm.expectEmit(true, false, false, true);
+        emit LendingPoolCore.ReserveUpdated(
+            address(token), liquidityRate, stableBorrowRate, variableBorrowRate, RAY, RAY
+        );
+
+        // Call the complete external borrow state-update flow as the LendingPool. It reads the
+        // user's previous debt (zero), records reserve and user variable debt, reprices the
+        // reserve, and returns the user's current variable borrow rate.
+        vm.prank(lendingPool);
+        (uint256 userBorrowRate, uint256 balanceIncrease) = core.updateStateOnBorrow(
+            address(token), user, amountBorrowed, borrowFee, CoreLibrary.InterestRateMode.VARIABLE
+        );
+
+        // Read both storage records after the full borrow flow has completed.
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        // This is the user's first borrow, so there is no previous principal on which interest
+        // could have accrued. Variable borrowers return the reserve's newly stored 7% variable rate.
+        assertEq(userBorrowRate, variableBorrowRate);
+        assertEq(balanceIncrease, 0);
+
+        // The 100-token loan belongs entirely to variable debt. Unlike stable debt, variable debt
+        // has no weighted-average borrow-rate field to update.
+        assertEq(reserve.totalBorrowsStable, 0);
+        assertEq(reserve.totalBorrowsVariable, amountBorrowed);
+        assertEq(reserve.currentAverageStableBorrowRate, 0);
+
+        // The reserve persists the rates returned by the strategy for the next interest period
+        // and records the timestamp at which those new rates begin applying.
+        assertEq(reserve.currentLiquidityRate, liquidityRate);
+        assertEq(reserve.currentStableBorrowRate, stableBorrowRate);
+        assertEq(reserve.currentVariableBorrowRate, variableBorrowRate);
+        assertEq(reserve.lastUpdateTimestamp, updateTimestamp);
+
+        // The user's principal is the borrowed amount and the fee is stored separately. A variable
+        // position has no personal stable rate; instead it saves the reserve's current variable
+        // index as its checkpoint for calculating future variable interest.
+        assertEq(userData.principalBorrowBalance, amountBorrowed);
+        assertEq(userData.originationFee, borrowFee);
+        assertEq(userData.stableBorrowRate, 0);
+        assertEq(userData.lastVariableBorrowCumulativeIndex, RAY);
+        assertEq(userData.lastUpdateTimestamp, updateTimestamp);
+    }
+
+    // Scenario: a user with existing stable-rate debt takes another stable-rate borrow. (`STABLE` -> `STABLE`)
+    // An additional stable borrow first materializes interest at the user's old personal stable
+    // rate, then records the complete updated position at the reserve's currently offered rate.
+    function testUpdateStateOnBorrowAdditionalStableBorrowAccruesDebtAndUpdatesStableRate()
+        external
+        withInitReserve(address(token))
+    {
+        // The core holds 1,000 tokens before the user's additional 50-token stable borrow.
+        // The user earned stable interest at their personal old 5% rate during the elapsed year.
+        // The reserve currently offers 6% for the user's complete updated stable position.
+        uint256 currentStableBorrowRate = 6e25; // 6%
+        // The strategy returns these rates after the borrow. Its 8% stable rate affects future
+        // stable borrows, but not this user's position, which is recorded at the current 6% rate.
+        uint256 newLiquidityRate = 3e25; // 3%
+        uint256 newStableBorrowRate = 8e25; // 8%
+        uint256 newVariableBorrowRate = 7e25; // 7%
+        uint256 amountBorrowed = 50 ether;
+        // Set the update time one year ahead so reserve and user interest accrue for exactly one year.
+        uint256 updateTimestamp = block.timestamp + 365 days;
+
+        // Mint the liquidity so the strategy calculates rates from the core's real pre-borrow balance.
+        token.mint(address(core), 1_000 ether);
+
+        // Before the new borrow, the reserve has the user's 100-token stable debt. The reserve's
+        // stable-debt average is also 5%, because this user is the only stable borrower. Its old
+        // liquidity and variable rates are used only while checkpointing the elapsed year.
+        core.setReserveRates(address(token), 5e25, currentStableBorrowRate, 10e25);
+        core.setReserveBorrows(address(token), 100 ether, 0);
+        core.setReserveCurrentAverageStableBorrowRate(address(token), 5e25);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        core.setReserveLastUpdateTimestamp(address(token), uint40(block.timestamp));
+
+        // Seed the user's old stable position. Stable debt uses the user's personal rate and does
+        // not use a variable index. The 2-token fee and collateral flag should both be preserved.
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether,
+                lastVariableBorrowCumulativeIndex: 0,
+                originationFee: 2 ether,
+                stableBorrowRate: 5e25,
+                lastUpdateTimestamp: uint40(block.timestamp),
+                useAsCollateral: true
+            })
+        );
+
+        // Advance one year so the old 100-token stable principal accrues at the user's old 5% rate.
+        vm.warp(updateTimestamp);
+        strategy.setRates(newLiquidityRate, newStableBorrowRate, newVariableBorrowRate);
+
+        // Calculate the same compounded factor used for a stable borrow balance. The balance
+        // increase is the one-year growth on the 100-token stored principal at the personal 5% rate.
+        uint256 expectedBalanceIncrease = uint256(100 ether).rayMul(
+            (RAY + uint256(5e25) / 365 days).rayPow(365 days)
+        ) - 100 ether;
+        // The complete updated position is old principal + materialized interest + new borrow.
+        uint256 expectedPrincipal = 100 ether + expectedBalanceIncrease + amountBorrowed;
+
+        // After removing the user's old stable principal, the helper adds this complete updated
+        // principal back at 6%. The strategy therefore receives 950 tokens of pending post-borrow
+        // liquidity, the new stable total, no variable debt, and a 6% stable-debt average.
+        vm.expectCall(
+            address(strategy),
+            abi.encodeCall(
+                IReserveInterestRateStrategy.calculateInterestRates,
+                (
+                    address(token),
+                    1_000 ether - amountBorrowed,
+                    expectedPrincipal,
+                    0,
+                    currentStableBorrowRate
+                )
+            )
+        );
+
+        // Run the full borrow flow as the LendingPool. The returned rate is the user's stored
+        // stable rate, rather than the strategy's newly returned 8% stable rate.
+        vm.prank(lendingPool);
+        (uint256 userBorrowRate, uint256 balanceIncrease) = core.updateStateOnBorrow(
+            address(token), user, amountBorrowed, 1 ether, CoreLibrary.InterestRateMode.STABLE
+        );
+
+        // Read storage after the reserve and user updates have both completed.
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        // The returned balance increase is the interest accumulated at the old 5% personal rate.
+        // The user's new stable rate is 6%, the rate offered before the reserve was repriced.
+        assertEq(userBorrowRate, currentStableBorrowRate);
+        assertEq(balanceIncrease, expectedBalanceIncrease);
+
+        // The position remains entirely stable. Because it is still the only stable position, the
+        // reserve's stable total and weighted average respectively equal its complete principal and 6% rate.
+        assertEq(reserve.totalBorrowsStable, expectedPrincipal);
+        assertEq(reserve.totalBorrowsVariable, 0);
+        assertEq(reserve.currentAverageStableBorrowRate, currentStableBorrowRate);
+
+        // The strategy's rates are stored for the future, independently of the user's 6% stable rate.
+        assertEq(reserve.currentLiquidityRate, newLiquidityRate);
+        assertEq(reserve.currentStableBorrowRate, newStableBorrowRate);
+        assertEq(reserve.currentVariableBorrowRate, newVariableBorrowRate);
+        assertEq(reserve.lastUpdateTimestamp, updateTimestamp);
+
+        // The user stores the complete debt, adds the new fee to the old 2-token fee, keeps no
+        // variable-index checkpoint, receives the 6% stable rate, and retains collateral usage.
+        assertEq(userData.principalBorrowBalance, expectedPrincipal);
+        assertEq(userData.originationFee, 3 ether);
+        assertEq(userData.stableBorrowRate, currentStableBorrowRate);
+        assertEq(userData.lastVariableBorrowCumulativeIndex, 0);
+        assertEq(userData.lastUpdateTimestamp, updateTimestamp);
+        assertTrue(userData.useAsCollateral);
+    }
+
+    // Scenario: a user with existing variable-rate debt borrows more at a variable rate. (`VARIABLE` -> `VARIABLE`)
+    // An additional variable borrow materializes the user's accrued debt before
+    // adding the new amount, checkpoints the variable index, and returns the new
+    // reserve variable rate.
+    function testUpdateStateOnBorrowAdditionalVariableBorrowAccruesDebtAndReturnsVariableRate()
+        external
+        withInitReserve(address(token))
+    {
+        // The core holds 1,000 tokens before the additional 50-token borrow.
+        uint256 availableLiquidity = 1_000 ether;
+        // The user's existing variable debt accrues for one year at this old 10% rate.
+        uint256 oldVariableBorrowRate = 10e25;
+        // The strategy returns these rates after the additional borrow updates reserve debt totals.
+        uint256 newLiquidityRate = 3e25;
+        uint256 newStableBorrowRate = 6e25;
+        uint256 newVariableBorrowRate = 7e25;
+        // The user borrows another 50 tokens and pays a 1-token additional origination fee.
+        uint256 amountBorrowed = 50 ether;
+        uint256 borrowFee = 1 ether;
+        // Save the starting time so the next update spans exactly one year.
+        uint256 previousTimestamp = block.timestamp;
+
+        // Mint the liquidity so the rate calculation begins with the core's real pre-borrow balance.
+        token.mint(address(core), availableLiquidity);
+
+        // The old 5% liquidity rate and 10% variable rate apply only to the elapsed year.
+        // The reserve has no stable debt and 100 tokens of variable debt, all owned by this user.
+        core.setReserveRates(address(token), 5e25, 0, oldVariableBorrowRate);
+        core.setReserveBorrows(address(token), 0, 100 ether);
+        // Both the reserve and the user's variable-debt checkpoint begin at the same timestamp.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        core.setReserveLastUpdateTimestamp(address(token), uint40(previousTimestamp));
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether,
+                lastVariableBorrowCumulativeIndex: RAY,
+                originationFee: 2 ether,
+                stableBorrowRate: 0,
+                lastUpdateTimestamp: uint40(previousTimestamp),
+                useAsCollateral: true
+            })
+        );
+
+        // Let exactly one year pass. updateStateOnBorrow must now materialize the interest that
+        // accumulated on the user's stored principal during this elapsed period.
+        uint256 updateTimestamp = previousTimestamp + 365 days;
+        vm.warp(updateTimestamp);
+        // Configure the mock rates that become active after this borrow has completed.
+        strategy.setRates(newLiquidityRate, newStableBorrowRate, newVariableBorrowRate);
+
+        // Calculate the same one-year compounded variable index used by the protocol:
+        // (1 ray + old annual variable rate / seconds per year) ^ seconds per year.
+        uint256 expectedIndex = RAY.rayMul((RAY + oldVariableBorrowRate / 365 days).rayPow(365 days));
+
+        // Scale the old 100-token principal by that new index, then subtract the stored principal
+        // to isolate the accrued interest that updateStateOnBorrow returns as balanceIncrease.
+        uint256 expectedBalanceIncrease = uint256(100 ether).rayMul(expectedIndex);
+        expectedBalanceIncrease -= 100 ether;
+
+        // The updated principal includes the old principal, accrued interest, and the 50-token
+        // additional loan. The origination fee is tracked separately from principal.
+        uint256 expectedPrincipal = 100 ether + expectedBalanceIncrease + amountBorrowed;
+
+        // Execute the complete borrow update as the LendingPool. It checkpoints reserve indexes
+        // with the old rates, materializes the user's debt, updates variable totals, reprices the
+        // reserve, and returns the user's current variable borrow rate.
+        vm.prank(lendingPool);
+        (uint256 userBorrowRate, uint256 balanceIncrease) = core.updateStateOnBorrow(
+            address(token), user, amountBorrowed, borrowFee, CoreLibrary.InterestRateMode.VARIABLE
+        );
+
+        // Read the reserve-wide and user-specific records after the full state transition.
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        // Variable borrowers use the reserve's current variable rate: the new 7% rate returned
+        // by the strategy. The returned interest must match the calculated year's growth.
+        assertEq(userBorrowRate, newVariableBorrowRate);
+        assertEq(balanceIncrease, expectedBalanceIncrease);
+
+        // The position remains variable, so no stable debt exists. The variable total contains
+        // the user's previous principal, materialized interest, and new 50-token borrow. The
+        // reserve's checkpointed index matches the index used to calculate that interest.
+        assertEq(reserve.totalBorrowsStable, 0);
+        assertEq(reserve.totalBorrowsVariable, expectedPrincipal);
+        assertEq(reserve.lastVariableBorrowCumulativeIndex, expectedIndex);
+        // These strategy rates and timestamp apply to all future reserve interest accrual.
+        assertEq(reserve.currentLiquidityRate, newLiquidityRate);
+        assertEq(reserve.currentStableBorrowRate, newStableBorrowRate);
+        assertEq(reserve.currentVariableBorrowRate, newVariableBorrowRate);
+        assertEq(reserve.lastUpdateTimestamp, updateTimestamp);
+        // The user stores the fully materialized principal, adds the new fee to the existing
+        // 2-token fee, remains variable (zero stable rate), and saves the checkpointed variable
+        // index for future interest. Borrowing does not affect collateral usage.
+        assertEq(userData.principalBorrowBalance, expectedPrincipal);
+        assertEq(userData.originationFee, 3 ether);
+        assertEq(userData.stableBorrowRate, 0);
+        assertEq(userData.lastVariableBorrowCumulativeIndex, expectedIndex);
+        assertEq(userData.lastUpdateTimestamp, updateTimestamp);
+        assertTrue(userData.useAsCollateral);
+    }
+
+    // Scenario: a user with stable-rate debt borrows at a variable rate. (`STABLE` -> `VARIABLE`)
+    // A stable borrower can take a new variable-rate borrow. The entire updated position moves
+    // from the stable aggregate to the variable aggregate and begins using the variable index.
+    function testUpdateStateOnBorrowSwitchesStableDebtToVariableDebt() external withInitReserve(address(token)) {
+        // The core holds enough liquidity for the 50-token borrow that will be priced by the strategy.
+        uint256 amountBorrowed = 50 ether;
+        // The user's old stable debt is 100 tokens at 6%. They are the only stable borrower.
+        uint256 oldStableBorrowRate = 6e25; // 6%
+        // The reserve also has 200 tokens of pre-existing variable debt owned by other users.
+        // The strategy returns these future reserve-wide rates after the mode switch.
+        uint256 newLiquidityRate = 3e25; // 3%
+        uint256 newStableBorrowRate = 8e25; // 8%
+        // The new variable rate is returned to the user after this mode switch.
+        uint256 newVariableBorrowRate = 7e25; // 7%
+
+        // The strategy sees the core's actual pre-borrow balance. The 50 tokens are subtracted
+        // as pending liquidity removal when updateStateOnBorrow reprices the reserve.
+        token.mint(address(core), 1_000 ether);
+        // The current stable rate is needed while removing the old stable position. The strategy
+        // supplies future rates only after the user has been converted to variable debt.
+        core.setReserveRates(address(token), 5e25, oldStableBorrowRate, 10e25);
+        core.setReserveBorrows(address(token), 100 ether, 200 ether);
+        core.setReserveCurrentAverageStableBorrowRate(address(token), oldStableBorrowRate);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        core.setReserveLastUpdateTimestamp(address(token), uint40(block.timestamp));
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether,
+                lastVariableBorrowCumulativeIndex: 0,
+                originationFee: 2 ether,
+                stableBorrowRate: oldStableBorrowRate,
+                lastUpdateTimestamp: uint40(block.timestamp),
+                useAsCollateral: true
+            })
+        );
+
+        // Let the old 100-token stable position accrue for one year at the user's personal 6%
+        // stable rate. The reserve's indexes also checkpoint this same year using their old rates.
+        uint256 updateTimestamp = block.timestamp + 365 days;
+        vm.warp(updateTimestamp);
+        strategy.setRates(newLiquidityRate, newStableBorrowRate, newVariableBorrowRate);
+
+        // The stable balance growth is calculated from the user's personal stable rate, not the
+        // reserve's variable rate. It is materialized before the complete position changes mode.
+        //
+        // ratePerSecond = 6% / 365 days
+        // compoundedInterest = (1 ray + ratePerSecond) ^ (365 days)
+        // compoundedBalance = 100 tokens * compoundedInterest
+        // balanceIncrease = compoundedBalance - 100 tokens
+        uint256 expectedBalanceIncrease = uint256(100 ether).rayMul(
+            (RAY + oldStableBorrowRate / 365 days).rayPow(365 days)
+        ) - 100 ether;
+        uint256 expectedUserPrincipal = 100 ether + expectedBalanceIncrease + amountBorrowed;
+        // Pre-existing variable borrowers cause the reserve's variable index to compound at 10%.
+        //
+        // ratePerSecond = 10% / 365 days
+        // compoundedInterest = (1 ray + ratePerSecond) ^ (365 days)
+        // newVariableBorrowIndex = previousVariableBorrowIndex * compoundedInterest
+        //                         = 1 ray * compoundedInterest
+        uint256 expectedVariableBorrowIndex = RAY.rayMul(
+            (RAY + uint256(10e25) / 365 days).rayPow(365 days)
+        );
+
+        // First remove the user's old 100-token stable principal. Then add their complete
+        // variable position: old principal + accrued stable interest + new borrow. The strategy
+        // consequently receives 950 liquidity, no stable debt, and all resulting variable debt.
+        vm.expectCall(
+            address(strategy),
+            abi.encodeCall(
+                IReserveInterestRateStrategy.calculateInterestRates,
+                (address(token), 1_000 ether - amountBorrowed, 0, 200 ether + expectedUserPrincipal, 0)
+            )
+        );
+
+        // Call the full external borrow update. It materializes the year's stable interest before
+        // moving the user's complete debt position into variable-rate accounting.
+        vm.prank(lendingPool);
+        (uint256 userBorrowRate, uint256 balanceIncrease) = core.updateStateOnBorrow(
+            address(token), user, amountBorrowed, 1 ether, CoreLibrary.InterestRateMode.VARIABLE
+        );
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        // A variable borrower returns the reserve's newly stored variable rate, not their old
+        // personal stable rate. The returned balance increase is the year's old stable-rate interest.
+        assertEq(userBorrowRate, newVariableBorrowRate);
+        assertEq(balanceIncrease, expectedBalanceIncrease);
+
+        // The user was the only stable borrower, so stable debt and its average both become zero.
+        // Their complete updated position joins the other 200 tokens of variable debt.
+        assertEq(reserve.totalBorrowsStable, 0);
+        assertEq(reserve.currentAverageStableBorrowRate, 0);
+        assertEq(reserve.totalBorrowsVariable, 200 ether + expectedUserPrincipal);
+
+        assertEq(reserve.lastVariableBorrowCumulativeIndex, expectedVariableBorrowIndex);
+        assertEq(reserve.currentLiquidityRate, newLiquidityRate);
+        assertEq(reserve.currentStableBorrowRate, newStableBorrowRate);
+        assertEq(reserve.currentVariableBorrowRate, newVariableBorrowRate);
+        assertEq(reserve.lastUpdateTimestamp, updateTimestamp);
+
+        // The user's complete debt now uses variable-rate accounting: the stable rate is cleared
+        // and the newly checkpointed reserve variable index becomes their future-interest checkpoint.
+        assertEq(userData.principalBorrowBalance, expectedUserPrincipal);
+        assertEq(userData.originationFee, 3 ether);
+        assertEq(userData.stableBorrowRate, 0);
+        assertEq(userData.lastVariableBorrowCumulativeIndex, expectedVariableBorrowIndex);
+        assertEq(userData.lastUpdateTimestamp, updateTimestamp);
+        
+        assertTrue(userData.useAsCollateral);
+    }
+
+    // A variable borrower can take a new stable-rate borrow. The entire updated position moves
+    // from the variable aggregate to the stable aggregate and receives the current stable rate.
+    // Scenario: a user with variable-rate debt borrows at a stable rate. (`VARIABLE` -> `STABLE`)
+    function testUpdateStateOnBorrowSwitchesVariableDebtToStableDebt() external withInitReserve(address(token)) {
+        uint256 amountBorrowed = 50 ether;
+        // The reserve already has 200 tokens of stable debt from other users, priced at a 7% average.
+        // The current 6% reserve stable rate is assigned to the user's complete updated position.
+        uint256 currentStableBorrowRate = 6e25; // 6%
+        // The user's existing variable debt and the reserve's variable index accrue at this old rate.
+        uint256 oldVariableBorrowRate = 10e25; // 10%
+
+        token.mint(address(core), 1_000 ether);
+        // The user owns all 100 tokens of variable debt. The separate 200-token stable position
+        // remains in the stable bucket when the user's updated debt later joins it.
+        core.setReserveRates(address(token), 5e25, currentStableBorrowRate, oldVariableBorrowRate);
+        core.setReserveBorrows(address(token), 200 ether, 100 ether);
+        core.setReserveCurrentAverageStableBorrowRate(address(token), 7e25);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        core.setReserveLastUpdateTimestamp(address(token), uint40(block.timestamp));
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether,
+                lastVariableBorrowCumulativeIndex: RAY,
+                originationFee: 2 ether,
+                stableBorrowRate: 0,
+                lastUpdateTimestamp: uint40(block.timestamp),
+                useAsCollateral: true
+            })
+        );
+
+        // Advance one year so the user's stored variable principal grows using the old 10% variable
+        // rate. updateStateOnBorrow materializes this accrued interest before changing rate modes.
+        uint256 updateTimestamp = block.timestamp + 365 days;
+        vm.warp(updateTimestamp);
+
+        // ratePerSecond = 10% / 365 days
+        // compoundedInterest = (1 ray + ratePerSecond) ^ (365 days)
+        // compoundedBalance = 100 tokens * compoundedInterest
+        // balanceIncrease = compoundedBalance - 100 tokens
+        uint256 expectedBalanceIncrease = uint256(100 ether).rayMul(
+            (RAY + oldVariableBorrowRate / 365 days).rayPow(365 days)
+        ) - 100 ether;
+
+        // The complete updated stable position contains old variable principal, its materialized
+        // variable interest, and the 50-token new stable borrow. This position then combines with
+        // the other 200 stable tokens at the reserve's current 6% stable rate.
+        uint256 updatedUserPrincipal = 100 ether + expectedBalanceIncrease + amountBorrowed;
+        uint256 expectedStableDebt = 200 ether + updatedUserPrincipal;
+        // The reserve's average stable rate is the debt-weighted average of both stable positions:
+        //
+        // weightedOtherDebt = 200 tokens * 7%
+        // weightedUserDebt = updatedUserPrincipal * 6%
+        // averageStableRate = (weightedOtherDebt + weightedUserDebt) / expectedStableDebt
+        //
+        // Debt amounts are stored in wad precision, while rates use ray precision. wadToRay()
+        // converts the amounts before rayMul()/rayDiv() perform the protocol's rounded ray math.
+        uint256 expectedAverageStableRate = (
+            uint256(200 ether).wadToRay().rayMul(7e25)
+                + updatedUserPrincipal.wadToRay().rayMul(currentStableBorrowRate)
+        ).rayDiv(expectedStableDebt.wadToRay());
+        // The strategy returns these rates after the mode switch for future reserve accrual.
+        // This scope lets the setup-only values leave the stack before the borrow call below.
+        {
+            uint256 newLiquidityRate = 3e25; // 3%
+            uint256 newStableBorrowRate = 8e25; // 8%
+            uint256 newVariableBorrowRate = 7e25; // 7%
+            strategy.setRates(newLiquidityRate, newStableBorrowRate, newVariableBorrowRate);
+        }
+
+        // After removing the user's old 100-token variable principal, the strategy sees 950
+        // tokens of available liquidity, 350 stable debt, no variable debt, and the new average.
+        vm.expectCall(
+            address(strategy),
+            abi.encodeCall(
+                IReserveInterestRateStrategy.calculateInterestRates,
+                (address(token), 1_000 ether - amountBorrowed, expectedStableDebt, 0, expectedAverageStableRate)
+            )
+        );
+
+        // The mode switch moves the user's old variable principal, its accrued variable interest,
+        // and the 50-token borrow into stable debt. The 1-token new fee remains separate from principal.
+        vm.prank(lendingPool);
+        (uint256 userBorrowRate, uint256 balanceIncrease) = core.updateStateOnBorrow(
+            address(token), user, amountBorrowed, 1 ether, CoreLibrary.InterestRateMode.STABLE
+        );
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        // Stable borrowers return their personal stored stable rate: the 6% rate available before
+        // the strategy repriced the reserve to 8% for future stable borrowers. The returned balance
+        // increase is the variable interest accrued during the year before the mode switch.
+        //
+        // ratePerSecond = 10% / 365 days
+        // compoundedInterest = (1 ray + ratePerSecond) ^ (365 days)
+        // newVariableBorrowIndex = previousVariableBorrowIndex * compoundedInterest
+        //                         = 1 ray * compoundedInterest
+        uint256 expectedVariableBorrowIndex = RAY.rayMul(
+            (RAY + oldVariableBorrowRate / 365 days).rayPow(365 days)
+        );
+        assertEq(userBorrowRate, currentStableBorrowRate);
+        assertEq(balanceIncrease, expectedBalanceIncrease);
+
+        // The old variable bucket is empty. The stable bucket contains the other users' debt plus
+        // the user's 150-token updated position, with the expected weighted stable-rate average.
+        assertEq(reserve.totalBorrowsVariable, 0);
+        assertEq(reserve.totalBorrowsStable, expectedStableDebt);
+        assertEq(reserve.currentAverageStableBorrowRate, expectedAverageStableRate);
+        assertEq(reserve.lastVariableBorrowCumulativeIndex, expectedVariableBorrowIndex);
+
+        assertEq(reserve.currentLiquidityRate, 3e25);
+        assertEq(reserve.currentStableBorrowRate, 8e25);
+        assertEq(reserve.currentVariableBorrowRate, 7e25);
+        assertEq(reserve.lastUpdateTimestamp, updateTimestamp);
+
+        // The user now has stable-rate accounting: the variable index is cleared, their complete
+        // principal is stored, the fee increases from 2 to 3 tokens, and collateral usage remains set.
+        assertEq(userData.principalBorrowBalance, updatedUserPrincipal);
+        assertEq(userData.originationFee, 3 ether);
+        assertEq(userData.stableBorrowRate, currentStableBorrowRate);
+        assertEq(userData.lastVariableBorrowCumulativeIndex, 0);
+        assertEq(userData.lastUpdateTimestamp, updateTimestamp);
+        assertTrue(userData.useAsCollateral);
+    }
+
+    function testUpdateStateOnBorrowRevertsWhenCallerIsNotLendingPool() external {
+        vm.prank(attacker);
+        vm.expectRevert(LendingPoolCore.LendingPoolCore__OnlyLendingPool.selector);
+
+        core.updateStateOnBorrow(address(token), user, 1 ether, 0, CoreLibrary.InterestRateMode.STABLE);
+    }
+
+    ////////////////////////////////
+    // isReserveBorrowingEnabled  //
+    ////////////////////////////////
+
+    // An initialized reserve begins with borrowing disabled. The getter must return the borrowing
+    // flag stored in the reserve configuration after it is enabled.
+    function testIsReserveBorrowingEnabledReturnsStoredBorrowingFlag() external withInitReserve(address(token)) {
+        // initReserve does not enable borrowing, so the stored flag is false initially.
+        assertFalse(core.isReserveBorrowingEnabled(address(token)));
+
+        // Set the harness's reserve configuration to the state a configurator would create when
+        // enabling borrowing, then verify the getter exposes that stored value.
+        core.setReserveBorrowingEnabled(address(token), true);
+
+        assertTrue(core.isReserveBorrowingEnabled(address(token)));
+    }
+
+    ////////////////////////////////
+    //     getReserveDecimals      //
+    ////////////////////////////////
+
+    // The getter returns the decimal precision stored in the reserve configuration.
+    function testGetReserveDecimalsReturnsStoredDecimals() external {
+        uint256 decimals = 6;
+
+        // Write a USDC-like decimal value directly through the harness so this test covers only
+        // getReserveDecimals reading reserve storage, without depending on reserve initialization.
+        core.setReserveDecimals(address(token), decimals);
+
+        assertEq(core.getReserveDecimals(address(token)), decimals);
+    }
+
+    ////////////////////////////////
+    //    getUserBorrowBalances    //
+    ////////////////////////////////
+
+    // A user without stored principal has no active debt, so all three returned balances are zero.
+    function testGetUserBorrowBalancesReturnsZerosWhenUserHasNoDebt() external view {
+        (uint256 principal, uint256 compoundedBalance, uint256 balanceIncrease) =
+            core.getUserBorrowBalances(address(token), user);
+
+        assertEq(principal, 0);
+        assertEq(compoundedBalance, 0);
+        assertEq(balanceIncrease, 0);
+    }
+
+    // Stable debt compounds at the user's personal stable rate from the user's last-update timestamp.
+    function testGetUserBorrowBalancesReturnsCompoundedStableDebt() external {
+        uint256 principalBorrowBalance = 100 ether;
+        uint256 stableBorrowRate = 5e25; // 5%
+        uint256 previousTimestamp = block.timestamp;
+
+        // Seed a stable position directly so this getter test does not depend on a borrow action.
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: principalBorrowBalance,
+                lastVariableBorrowCumulativeIndex: 0,
+                originationFee: 0,
+                stableBorrowRate: stableBorrowRate,
+                lastUpdateTimestamp: uint40(previousTimestamp),
+                useAsCollateral: false
+            })
+        );
+
+        // Allow exactly one year of interest to accrue at the user's personal 5% stable rate.
+        vm.warp(previousTimestamp + 365 days);
+
+        // ratePerSecond = 5% / 365 days
+        // compoundedInterest = (1 ray + ratePerSecond) ^ (365 days)
+        // compoundedBalance = 100 tokens * compoundedInterest
+        uint256 compoundedInterest = (RAY + stableBorrowRate / 365 days).rayPow(365 days);
+        // principalBorrowBalance is stored in wad precision (1e18), while compoundedInterest is
+        // expressed in ray precision (1e27). Convert the principal to ray, multiply the two ray
+        // values with rayMul(), then convert the resulting token balance back to wad precision.
+        uint256 expectedCompoundedBalance = principalBorrowBalance.wadToRay().rayMul(compoundedInterest).rayToWad();
+
+        (uint256 principal, uint256 compoundedBalance, uint256 balanceIncrease) =
+            core.getUserBorrowBalances(address(token), user);
+
+        assertEq(principal, principalBorrowBalance);
+        assertEq(compoundedBalance, expectedCompoundedBalance);
+        assertEq(balanceIncrease, expectedCompoundedBalance - principalBorrowBalance);
+    }
+
+    // Variable debt compounds from the user's saved variable-index checkpoint to the reserve's
+    // current index, including the growth since the reserve's last update.
+    function testGetUserBorrowBalancesReturnsCompoundedVariableDebt() external {
+        uint256 principalBorrowBalance = 100 ether;
+        uint256 variableBorrowRate = 10e25; // 10%
+        uint256 previousTimestamp = block.timestamp;
+
+        // The user starts at the initial variable index of one ray. Configure the reserve directly
+        // so this getter test remains independent from reserve initialization and borrow updates.
+        core.setReserveVariableBorrowIndex(address(token), RAY);
+        core.setReserveRates(address(token), 0, 0, variableBorrowRate);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        core.setReserveLastUpdateTimestamp(address(token), uint40(previousTimestamp));
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: principalBorrowBalance,
+                lastVariableBorrowCumulativeIndex: RAY,
+                originationFee: 0,
+                stableBorrowRate: 0,
+                lastUpdateTimestamp: uint40(previousTimestamp),
+                useAsCollateral: false
+            })
+        );
+
+        // Let one year pass. The getter calculates the new reserve index in memory; it does not
+        // write that index to storage because getUserBorrowBalances is a view function.
+        vm.warp(previousTimestamp + 365 days);
+
+        // ratePerSecond = 10% / 365 days
+        // compoundedInterest = (1 ray + ratePerSecond) ^ (365 days)
+        // currentReserveIndex = 1 ray * compoundedInterest
+        // userGrowthFactor = currentReserveIndex / 1 ray = compoundedInterest
+        uint256 compoundedInterest = (RAY + variableBorrowRate / 365 days).rayPow(365 days);
+        // principalBorrowBalance is stored in wad precision (1e18), while compoundedInterest is
+        // expressed in ray precision (1e27). Convert the principal to ray, multiply the two ray
+        // values with rayMul(), then convert the resulting token balance back to wad precision.
+        uint256 expectedCompoundedBalance = principalBorrowBalance.wadToRay().rayMul(compoundedInterest).rayToWad();
+
+        (uint256 principal, uint256 compoundedBalance, uint256 balanceIncrease) =
+            core.getUserBorrowBalances(address(token), user);
+
+        assertEq(principal, principalBorrowBalance);
+        assertEq(compoundedBalance, expectedCompoundedBalance);
+        assertEq(balanceIncrease, expectedCompoundedBalance - principalBorrowBalance);
+    }
+
+    ///////////////////////////////////////
+    //  isUserAllowedToBorrowAtStable     //
+    ///////////////////////////////////////
+
+    // Stable borrowing is never allowed when the reserve has stable-rate borrowing disabled.
+    function testIsUserAllowedToBorrowAtStableReturnsFalseWhenStableBorrowingIsDisabled() external view {
+        assertFalse(core.isUserAllowedToBorrowAtStable(address(token), user, 1 ether));
+    }
+
+    // Once stable borrowing is enabled, a user who is not using this reserve as collateral passes
+    // the same-asset restriction without needing to read an aToken balance.
+    function testIsUserAllowedToBorrowAtStableReturnsTrueWhenUserDoesNotUseReserveAsCollateral() external {
+        core.setReserveStableBorrowRateEnabled(address(token), true);
+        core.setReserveConfiguration(address(token), 0, 0, true);
+
+        assertTrue(core.isUserAllowedToBorrowAtStable(address(token), user, 1 ether));
+    }
+
+    // The same-asset restriction does not apply when this reserve is not configured as collateral,
+    // even when the user has marked their position as collateral.
+    function testIsUserAllowedToBorrowAtStableReturnsTrueWhenReserveCannotBeUsedAsCollateral() external {
+        core.setReserveStableBorrowRateEnabled(address(token), true);
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 0,
+                lastVariableBorrowCumulativeIndex: 0,
+                originationFee: 0,
+                stableBorrowRate: 0,
+                lastUpdateTimestamp: 0,
+                useAsCollateral: true
+            })
+        );
+
+        // usageAsCollateralEnabled is false, so the function returns true before reading aToken.
+        core.setReserveConfiguration(address(token), 0, 0, false);
+
+        assertTrue(core.isUserAllowedToBorrowAtStable(address(token), user, 1 ether));
+    }
+
+    // When the user uses this collateral-enabled reserve as collateral, a same-asset stable borrow
+    // must exceed the user's current underlying balance. Equal or smaller amounts are rejected.
+    function testIsUserAllowedToBorrowAtStableRequiresBorrowToExceedSameAssetCollateralBalance() external {
+        MockERC20 mockAToken = _initReserveWithMockAToken(address(token));
+        uint256 userUnderlyingBalance = 100 ether;
+
+        core.setReserveStableBorrowRateEnabled(address(token), true);
+        core.setReserveConfiguration(address(token), 0, 0, true);
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 0,
+                lastVariableBorrowCumulativeIndex: 0,
+                originationFee: 0,
+                stableBorrowRate: 0,
+                lastUpdateTimestamp: 0,
+                useAsCollateral: true
+            })
+        );
+
+        // The aToken balance represents the user's underlying deposit balance used by this check.
+        mockAToken.mint(user, userUnderlyingBalance);
+
+        // 100 <= 100: borrowing the same collateral asset at stable rate is not allowed.
+        assertFalse(core.isUserAllowedToBorrowAtStable(address(token), user, userUnderlyingBalance));
+        // 101 > 100: this specific same-asset stable-borrow restriction passes.
+        assertTrue(core.isUserAllowedToBorrowAtStable(address(token), user, userUnderlyingBalance + 1));
     }
 }
