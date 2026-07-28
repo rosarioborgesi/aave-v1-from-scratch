@@ -111,15 +111,15 @@ contract MockLendingPoolCore {
         return (data.decimals, data.baseLtv, data.liquidationThreshold, data.usageAsCollateralEnabled);
     }
 
+    function getReserveDecimals(address reserve) external view returns (uint256) {
+        return s_testReserveData[reserve].decimals;
+    }
+
     function getTestReserveData(address reserve) external view returns (TestReserveData memory) {
         return s_testReserveData[reserve];
     }
 
-    function getTestUserReserveData(address reserve, address user)
-        external
-        view
-        returns (TestUserReserveData memory)
-    {
+    function getTestUserReserveData(address reserve, address user) external view returns (TestUserReserveData memory) {
         return s_testUserReserveData[user][reserve];
     }
 
