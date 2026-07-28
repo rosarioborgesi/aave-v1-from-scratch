@@ -195,9 +195,8 @@ contract LendingPoolDataProvider {
         }
 
         // Read the user global position
-        (
-            , vars.collateralBalanceETH, vars.borrowBalanceETH, vars.totalFeesETH,, vars.currentLiquidationThreshold,,
-        ) = calculateUserGlobalData(_user);
+        (, vars.collateralBalanceETH, vars.borrowBalanceETH, vars.totalFeesETH,, vars.currentLiquidationThreshold,,) =
+            calculateUserGlobalData(_user);
 
         // If the user has no borrow, allow decrease
         // In other words: if the user has no debt, there is no liquidation risk
@@ -418,5 +417,36 @@ contract LendingPoolDataProvider {
         // healthfactor >= 1e18
         // -> user is not liquidatable
         healthFactorBelowThreshold = healthFactor < HEALTH_FACTOR_LIQUIDATION_THRESHOLD;
+    }
+
+    /**
+     * @notice calulcates the amount of collateral needed in ETH to cover a new borrow.
+     * @param _reserve the reserve from which the user wants to borrow
+     * @param _amount the amount the user wants to borrow
+     * @param _fee the fee for the amount that the user needs to cover
+     * @param _userCurrentBorrowBalanceETH the current borrow balance of the user (before the borrow)
+     * @param _userCurrentLtv the average ltv of the user given his current collateral
+     * @return the total amount of collateral in ETH to cover the current borrow balance + the new amount + fee
+     */
+    function calculateCollateralNeededInETH(
+        address _reserve,
+        uint256 _amount,
+        uint256 _fee,
+        uint256 _userCurrentBorrowBalanceETH,
+        uint256 _userCurrentFeesETH,
+        uint256 _userCurrentLtv
+    ) external view returns (uint256) {
+        uint256 reserveDecimals = i_core.getReserveDecimals(_reserve);
+
+        IPriceOracleGetter oracle = IPriceOracleGetter(i_addressesProvider.getPriceOracle());
+
+        // It converts the requested borrow amount plus its fee into their ETH-equivalent value
+        uint256 requestedBorrowAmountETH = oracle.getAssetPrice(_reserve) * (_amount + _fee) / (10 ** reserveDecimals); // price in ether
+
+        // Add the current already borrowed amount to the amount requested to calculate the total collateral needed.
+        uint256 collateralNeededInETH =
+            (_userCurrentBorrowBalanceETH + _userCurrentFeesETH + requestedBorrowAmountETH) * 100 / _userCurrentLtv; //LTV is calculated in percentage
+
+        return collateralNeededInETH;
     }
 }
