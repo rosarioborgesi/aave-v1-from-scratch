@@ -11,7 +11,8 @@ remappings = [
 exclude_lints = [
   "screaming-snake-case-immutable",
   "mixed-case-variable",
-  "unwrapped-modifier-logic"
+  "unwrapped-modifier-logic",
+  "mixed-case-function"
 ]
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
