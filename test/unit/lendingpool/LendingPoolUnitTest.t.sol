@@ -5,11 +5,14 @@ import {Test} from "forge-std/Test.sol";
 import {ReentrancyGuard} from "openzeppelin-contracts/utils/ReentrancyGuard.sol";
 
 import {MockERC20} from "../../mocks/MockERC20.sol";
+import {MockFeeProvider} from "../../mocks/MockFeeProvider.sol";
 import {MockLendingPoolCore} from "../../mocks/MockLendingPoolCore.sol";
 
 import {LendingPoolAddressesProvider} from "src/configuration/LendingPoolAddressesProvider.sol";
 import {EthAddressLib} from "src/libraries/EthAddressLib.sol";
 import {LendingPool} from "src/lendingpool/LendingPool.sol";
+import {LendingPoolDataProvider} from "src/lendingpool/LendingPoolDataProvider.sol";
+import {LendingPoolParametersProvider} from "src/configuration/LendingPoolParametersProvider.sol";
 
 contract ReentrantRedeemReceiver {
     LendingPool private immutable i_pool;
@@ -51,6 +54,10 @@ contract LendingPoolUnitTest is Test {
         addressesProvider.setLendingPool(makeAddr("temporaryLendingPool"));
         core = new MockLendingPoolCore();
         addressesProvider.setLendingPoolCore(address(core));
+
+        addressesProvider.setLendingPoolDataProvider(address(new LendingPoolDataProvider(address(addressesProvider))));
+        addressesProvider.setFeeProvider(address(new MockFeeProvider()));
+        addressesProvider.setLendingPoolParametersProvider(address(new LendingPoolParametersProvider()));
 
         pool = new LendingPool(address(addressesProvider));
         addressesProvider.setLendingPool(address(pool));

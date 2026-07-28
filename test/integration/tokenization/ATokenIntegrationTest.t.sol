@@ -4,6 +4,7 @@ pragma solidity 0.8.30;
 import {Test} from "forge-std/Test.sol";
 
 import {MockERC20} from "../../mocks/MockERC20.sol";
+import {MockFeeProvider} from "../../mocks/MockFeeProvider.sol";
 import {MockReserveInterestRateStrategy} from "../../mocks/MockReserveInterestRateStrategy.sol";
 
 import {AToken} from "src/tokenization/AToken.sol";
@@ -12,6 +13,7 @@ import {LendingPoolCore} from "src/lendingpool/LendingPoolCore.sol";
 import {LendingPoolDataProvider} from "src/lendingpool/LendingPoolDataProvider.sol";
 import {LendingPoolAddressesProvider} from "src/configuration/LendingPoolAddressesProvider.sol";
 import {WadRayMath} from "src/libraries/WadRayMath.sol";
+import {LendingPoolParametersProvider} from "src/configuration/LendingPoolParametersProvider.sol";
 
 contract ATokenIntegrationTest is Test {
     uint256 public constant DEPOSIT_AMOUNT = 100 ether;
@@ -36,11 +38,13 @@ contract ATokenIntegrationTest is Test {
         core = new LendingPoolCore(address(addressesProvider));
         addressesProvider.setLendingPoolCore(address(core));
 
-        pool = new LendingPool(address(addressesProvider));
-        addressesProvider.setLendingPool(address(pool));
-
         dataProvider = new LendingPoolDataProvider(address(addressesProvider));
         addressesProvider.setLendingPoolDataProvider(address(dataProvider));
+        addressesProvider.setFeeProvider(address(new MockFeeProvider()));
+        addressesProvider.setLendingPoolParametersProvider(address(new LendingPoolParametersProvider()));
+
+        pool = new LendingPool(address(addressesProvider));
+        addressesProvider.setLendingPool(address(pool));
 
         addressesProvider.setLendingPoolConfigurator(configurator);
 
@@ -60,7 +64,7 @@ contract ATokenIntegrationTest is Test {
     /////////////////////////////////////
     //             redeem              //
     /////////////////////////////////////
-    
+
     // TODO add more tests to extends coverage and edge cases
 
     function testUserCanDepositAndRedeemUnderlying() external {

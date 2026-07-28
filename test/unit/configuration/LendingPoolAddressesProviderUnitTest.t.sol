@@ -14,6 +14,7 @@ contract LendingPoolAddressesProviderUnitTest is Test {
     address private lendingPoolConfigurator = makeAddr("lendingPoolConfigurator");
     address private lendingPoolDataProvider = makeAddr("lendingPoolDataProvider");
     address private priceOracle = makeAddr("priceOracle");
+    address private feeProvider = makeAddr("feeProvider");
 
     LendingPoolAddressesProvider private addressesProvider;
 
@@ -167,6 +168,33 @@ contract LendingPoolAddressesProviderUnitTest is Test {
 
         vm.prank(owner);
         addressesProvider.setPriceOracle(address(0));
+    }
+
+    ////////////////////////////////
+    //        setFeeProvider       //
+    ////////////////////////////////
+    function testSetFeeProviderStoresAddressAndEmitsEvent() external {
+        vm.expectEmit(true, false, false, true, address(addressesProvider));
+        emit LendingPoolAddressesProvider.FeeProviderUpdated(feeProvider);
+
+        vm.prank(owner);
+        addressesProvider.setFeeProvider(feeProvider);
+
+        assertEq(addressesProvider.getFeeProvider(), feeProvider);
+    }
+
+    function testSetFeeProviderRevertsWhenCallerIsNotOwner() external {
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, attacker));
+
+        vm.prank(attacker);
+        addressesProvider.setFeeProvider(feeProvider);
+    }
+
+    function testSetFeeProviderRevertsWhenAddressIsZero() external {
+        vm.expectRevert(LendingPoolAddressesProvider.LendingPoolAddressesProvider__ZeroAddress.selector);
+
+        vm.prank(owner);
+        addressesProvider.setFeeProvider(address(0));
     }
 
     ////////////////////////////////
