@@ -18,6 +18,13 @@ Both types of debt grow over time. The difference is **which interest rate is ap
 
 The pool rates move when liquidity usage changes. For example, when a larger share of DAI in the pool is borrowed, borrowing DAI normally becomes more expensive.
 
+## What changes the rates?
+In Aave V1, both the reserve’s quoted variable and stable borrow rates are calculated by the reserve’s interest-rate strategy, mainly from utilization: how much liquidity is borrowed compared with the liquidity supplied. As utilization rises, the strategy raises borrowing rates to encourage repayments and new deposits; when utilization falls, rates decrease. 
+
+The protocol recalculates these rates automatically whenever an action changes the reserve’s liquidity or debt, such as a deposit, redeem, borrow, or repayment. Governance does not choose each new rate manually: it decides the interest-rate strategy and its parameters, while the smart contracts apply that curve automatically. 
+
+An existing variable borrower immediately follows the newly calculated variable rate. An existing stable borrower keeps their personal rate unless they borrow more—receiving a weighted-average rate—or their position is rebalanced under the protocol’s defined conditions.
+
 ## 1. Variable borrow: the rate follows the pool
 
 Bob borrows **1,000 DAI** when the pool's variable rate is **4%**.
@@ -115,6 +122,12 @@ Then Aave saves the current variable-borrow index as Bob's new checkpoint.
 Bob does **not** receive a weighted-average personal rate. From that point, his whole 1,520.20 DAI debt follows whatever the pool's variable rate is.
 
 If the rate remains 10% for another six months, his debt becomes approximately **1,598.13 DAI**.
+
+
+## Stable-borrowing Deprecation 
+Stable borrowing was later deprecated in Aave V3.2. Stable debt had already been used very little, while supporting it required separate debt accounting, rate calculations, and rebalancing logic.
+
+Variable-rate borrowing remains, with rates adapting automatically to reserve utilization.
 
 ## Key takeaway
 
