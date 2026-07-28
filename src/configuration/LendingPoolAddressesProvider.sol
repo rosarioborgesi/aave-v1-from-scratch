@@ -47,6 +47,8 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
     bytes32 private constant LENDING_POOL_CONFIGURATOR = "LENDING_POOL_CONFIGURATOR";
     bytes32 private constant DATA_PROVIDER = "DATA_PROVIDER";
     bytes32 private constant PRICE_ORACLE = "PRICE_ORACLE";
+    bytes32 private constant FEE_PROVIDER = "FEE_PROVIDER";
+    bytes32 private constant LENDING_POOL_PARAMETERS_PROVIDER = "PARAMETERS_PROVIDER";
 
     ////////////////////////////////
     //           Events           //
@@ -56,6 +58,8 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
     event LendingPoolConfiguratorUpdated(address indexed newAddress);
     event LendingPoolDataProviderUpdated(address indexed newAddress);
     event PriceOracleUpdated(address indexed newAddress);
+    event FeeProviderUpdated(address indexed newAddress);
+    event LendingPoolParametersProviderUpdated(address indexed newAddress);
 
     ////////////////////////////////
     //          Modifiers         //
@@ -108,6 +112,22 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
         emit PriceOracleUpdated(_priceOracle);
     }
 
+    function setFeeProvider(address _feeProvider) external onlyOwner {
+        if (_feeProvider == address(0)) {
+            revert LendingPoolAddressesProvider__ZeroAddress();
+        }
+        _setAddress(FEE_PROVIDER, _feeProvider);
+        emit FeeProviderUpdated(_feeProvider);
+    }
+
+    function setLendingPoolParametersProvider(address _parametersProvider) external onlyOwner {
+        if (_parametersProvider == address(0)) {
+            revert LendingPoolAddressesProvider__ZeroAddress();
+        }
+        _setAddress(LENDING_POOL_PARAMETERS_PROVIDER, _parametersProvider);
+        emit LendingPoolParametersProviderUpdated(_parametersProvider);
+    }
+
     ////////////////////////////////
     //       Public Functions     //
     ////////////////////////////////
@@ -138,5 +158,13 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
 
     function getPriceOracle() external view returns (address) {
         return getAddress(PRICE_ORACLE);
+    }
+
+    function getFeeProvider() external view returns (address) {
+        return getAddress(FEE_PROVIDER);
+    }
+
+    function getLendingPoolParametersProvider() external view returns (address) {
+        return getAddress(LENDING_POOL_PARAMETERS_PROVIDER);
     }
 }
