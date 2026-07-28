@@ -49,7 +49,7 @@ contract LendingPoolDataProviderUnitTest is Test {
 
         dataProvider = new LendingPoolDataProviderHarness(address(addressesProvider));
     }
-    
+
     // Input values for _setUpReserveScenario
     struct ReserveScenario {
         uint256 decimals;
@@ -76,7 +76,6 @@ contract LendingPoolDataProviderUnitTest is Test {
         oracle.setAssetPrice(reserveAddress, priceInETH);
     }
 
-    
     function _setUpReserveScenario(address reserveAddress, ReserveScenario memory scenario) internal {
         _setUpReserve(
             reserveAddress,
@@ -115,9 +114,9 @@ contract LendingPoolDataProviderUnitTest is Test {
         new LendingPoolDataProvider(address(providerWithoutCore));
     }
 
-    ////////////////////////////////
-    //     calculateHealthFactor  //
-    ////////////////////////////////
+    ////////////////////////////////////////////////
+    //     _calculateHealthFactorFromBalances     //
+    ////////////////////////////////////////////////
 
     function testCalculateHealthFactorReturnsMaxWhenUserHasNoBorrow() external view {
         uint256 healthFactor = dataProvider.exposedCalculateHealthFactorFromBalances(1 ether, 0, 0, 80);
@@ -194,8 +193,6 @@ contract LendingPoolDataProviderUnitTest is Test {
         assertEq(healthFactor, type(uint256).max);
         assertFalse(healthFactorBelowThreshold);
     }
-
-    
 
     function testCalculateUserGlobalDataAggregatesBalancesAcrossReserves() external {
         ReserveScenario memory firstReserveScenario = ReserveScenario({
@@ -400,7 +397,7 @@ contract LendingPoolDataProviderUnitTest is Test {
         assertLt(expectedHealthFactor, HEALTH_FACTOR_LIQUIDATION_THRESHOLD);
         assertTrue(healthFactorBelowThreshold);
     }
-
+    
     ////////////////////////////////
     //    balanceDecreaseAllowed  //
     ////////////////////////////////
@@ -502,5 +499,61 @@ contract LendingPoolDataProviderUnitTest is Test {
         // Since 0.96e18 is below the liquidation threshold of 1e18,
         // the balance decrease should not be allowed.
         assertFalse(allowed);
+    }
+
+    //////////////////////////////////////////
+    //    calculateCollateralNeededInETH     //
+    //////////////////////////////////////////
+
+    // Just tests that the calculateCollateralNeededInETH works correctly
+    function testCalculateCollateralNeededInETHIncludesNewBorrowFeeAndExistingDebt() external {
+        // 1 DAI = 0.0005 ETH and DAI has 18 decimals.
+        _setUpReserve(reserve, 18, 75, 80, true, 0.0005 ether);
+
+        uint256 amountToBorrow = 1_000 ether;
+        uint256 newBorrowFee = 10 ether;
+        uint256 currentBorrowBalanceETH = 0.5 ether;
+        uint256 currentFeesETH = 0.05 ether;
+        uint256 currentLtv = 75;
+
+        uint256 collateralNeededInETH = dataProvider.calculateCollateralNeededInETH(
+            reserve, amountToBorrow, newBorrowFee, currentBorrowBalanceETH, currentFeesETH, currentLtv
+        );
+
+        // New debt in ETH = (amountToBorrow + newBorrowFee) * DAI price in ETH
+        // New debt in ETH = (1,000 DAI + 10 DAI) * 0.0005 ETH = 0.505 ETH.
+
+        // Total debt in ETH = currentBorrowBalanceETH + currentFeesETH + newDebtInETH
+        // Total debt in ETH = 0.5 ETH + 0.05 ETH + 0.505 ETH = 1.055 ETH.
+
+        // Required collateral = Total debt in ETH * 100 / currentLtv
+        // Required collateral = 1.055 ETH * 100 / 75 = 1.406666666666666666 ETH.
+        assertEq(collateralNeededInETH, 1_406_666_666_666_666_666);
+    }
+
+    // Verifies that assets with decimals other than 18 are converted from raw token units to ETH correctly.
+    // For example, 2_000_000 units of a 6-decimal asset represent 2 tokens, not 2,000,000 tokens.
+    function testCalculateCollateralNeededInETHUsesReserveDecimalsWhenConvertingBorrowToETH() external {
+        // A 6-decimal reserve priced at 0.5 ETH per token.
+        _setUpReserve(reserve, 6, 80, 85, true, 0.5 ether);
+
+        uint256 currentBorrowBalanceETH = 0;
+        uint256 currentFeesETH = 0;
+
+        uint256 amountToBorrow = 2_000_000; // 2 tokens
+        uint256 newBorrowFee = 100_000; // 0.1 token
+
+        // This test represents a user with no existing debt (currentBorrowBalanceETH = 0) or fees (currentFeesETH = 0), using collateral with an 80% LTV
+        uint256 collateralNeededInETH =
+            dataProvider.calculateCollateralNeededInETH(reserve, amountToBorrow, newBorrowFee, currentBorrowBalanceETH, currentFeesETH, 80);
+
+        // new debt in ETH = (amountToBorrow + newBorrowFee) * token price in ETH
+        // new debt in ETH = 2.1 tokens * 0.5 ETH = 1.05 ETH.
+
+        // Total debt in ETH equals new debt in ETH because  currentBorrowBalanceETH = 0 and currentFeesETH = 0
+
+        // Required collateral = new debt in ETH * 100 / currentLtv
+        // Required collateral = 1.05 ETH * 100 / 80 = 1.3125 ETH.
+        assertEq(collateralNeededInETH, 1.3125 ether);
     }
 }
