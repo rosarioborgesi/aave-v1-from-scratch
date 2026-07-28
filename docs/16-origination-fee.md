@@ -137,10 +137,3 @@ The origination fee is a protocol fee rather than interest paid to depositors. I
 | Changes with time | Yes | No, after it is recorded |
 | Included in health factor debt | Yes | Yes |
 | Paid on repayment | Yes | Yes |
-
-## References
-
-- Aave Protocol Whitepaper V1.0, section 3.4: Repay. A repayment covers the borrowed amount, accrued interest, and origination fee.
-- Aave V1 `LendingPool`: https://github.com/aave/aave-protocol/blob/master/contracts/lendingpool/LendingPool.sol
-- Aave V1 `LendingPoolCore`: https://github.com/aave/aave-protocol/blob/master/contracts/lendingpool/LendingPoolCore.sol
-- Aave V1 `FeeProvider`: https://github.com/aave/aave-protocol/tree/master/contracts/fees

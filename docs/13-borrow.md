@@ -102,9 +102,3 @@ After a successful borrow:
 - the reserve's available liquidity decreases;
 - the reserve's total borrows increase;
 - interest rates are recalculated based on the new utilization.
-
-## References
-
-- Aave Protocol Whitepaper V1.0, section 3.3: Borrow
-- Aave V1 `LendingPool.borrow`: https://github.com/aave/aave-protocol/blob/master/contracts/lendingpool/LendingPool.sol
-- Aave V1 `LendingPoolCore.updateStateOnBorrow`: https://github.com/aave/aave-protocol/blob/master/contracts/lendingpool/LendingPoolCore.sol

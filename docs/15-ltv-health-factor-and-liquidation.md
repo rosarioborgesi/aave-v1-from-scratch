@@ -558,8 +558,3 @@ Remember the flow in this order:
 3. **The health factor compares protected collateral with debt and fees.**
 4. **Below `1`, the position can be liquidated.**
 
-## References
-
-- Aave Protocol Whitepaper V1.0, sections 1.1 and 3.6
-- Aave V1 `LendingPoolDataProvider`: https://github.com/aave/aave-protocol/blob/master/contracts/lendingpool/LendingPoolDataProvider.sol
-- Aave V1 `LendingPoolLiquidationManager`: https://github.com/aave/aave-protocol/blob/master/contracts/lendingpool/LendingPoolLiquidationManager.sol

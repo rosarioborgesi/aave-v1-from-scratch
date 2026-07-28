@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {MockERC20} from "../../mocks/MockERC20.sol";
 import {MockFeeProvider} from "../../mocks/MockFeeProvider.sol";
+import {MockPriceOracle} from "../../mocks/MockPriceOracle.sol";
 import {MockReserveInterestRateStrategy} from "../../mocks/MockReserveInterestRateStrategy.sol";
 
 import {AToken} from "src/tokenization/AToken.sol";
@@ -14,6 +15,7 @@ import {LendingPoolAddressesProvider} from "src/configuration/LendingPoolAddress
 import {WadRayMath} from "src/libraries/WadRayMath.sol";
 import {LendingPoolDataProvider} from "src/lendingpool/LendingPoolDataProvider.sol";
 import {LendingPoolParametersProvider} from "src/configuration/LendingPoolParametersProvider.sol";
+import {CoreLibrary} from "src/libraries/CoreLibrary.sol";
 
 contract LendingPoolCoreHarness is LendingPoolCore {
     constructor(address addressesProvider) LendingPoolCore(addressesProvider) {}
@@ -34,6 +36,18 @@ contract LendingPoolCoreHarness is LendingPoolCore {
         s_reserves[reserve].totalBorrowsStable = stableBorrows;
         s_reserves[reserve].totalBorrowsVariable = variableBorrows;
     }
+
+    function setReserveBorrowingEnabled(address reserve, bool borrowingEnabled) external {
+        s_reserves[reserve].borrowingEnabled = borrowingEnabled;
+    }
+
+    function setReserveConfiguration(address reserve, uint256 baseLtv, uint256 liquidationThreshold, bool usageAsCollateral)
+        external
+    {
+        s_reserves[reserve].baseLTVasCollateral = baseLtv;
+        s_reserves[reserve].liquidationThreshold = liquidationThreshold;
+        s_reserves[reserve].usageAsCollateralEnabled = usageAsCollateral;
+    }
 }
 
 contract LendingPoolIntegrationTest is Test {
@@ -51,7 +65,10 @@ contract LendingPoolIntegrationTest is Test {
 
     MockERC20 public dai;
     AToken public aDai;
+    MockERC20 public weth;
+    AToken public aWeth;
     MockReserveInterestRateStrategy public interestRateStrategy;
+    MockPriceOracle public priceOracle;
 
     function setUp() external {
         addressesProvider = new LendingPoolAddressesProvider(address(this));
@@ -71,14 +88,26 @@ contract LendingPoolIntegrationTest is Test {
         addressesProvider.setLendingPoolConfigurator(configurator);
 
         dai = new MockERC20("Mock DAI", "DAI");
+        weth = new MockERC20("Mock WETH", "WETH");
 
         aDai = new AToken(address(addressesProvider), address(dai), dai.decimals(), "Aave interest bearing DAI", "aDAI");
+        aWeth = new AToken(address(addressesProvider), address(weth), weth.decimals(), "Aave interest bearing WETH", "aWETH");
 
         interestRateStrategy = new MockReserveInterestRateStrategy();
+        priceOracle = new MockPriceOracle();
+        addressesProvider.setPriceOracle(address(priceOracle));
 
         vm.startPrank(configurator);
         core.initReserve(address(dai), address(aDai), dai.decimals(), address(interestRateStrategy));
+        core.initReserve(address(weth), address(aWeth), weth.decimals(), address(interestRateStrategy));
         vm.stopPrank();
+
+        core.setReserveConfiguration(address(dai), 75, 80, true);
+        core.setReserveBorrowingEnabled(address(weth), true);
+
+        // 1 ETH = 2,000 DAI, so 1 DAI = 0.0005 ETH.
+        priceOracle.setAssetPrice(address(dai), 0.0005 ether);
+        priceOracle.setAssetPrice(address(weth), 1 ether);
 
         dai.mint(user, DEPOSIT_AMOUNT);
     }
@@ -511,5 +540,60 @@ contract LendingPoolIntegrationTest is Test {
         vm.expectRevert();
 
         pool.deposit(address(dai), DEPOSIT_AMOUNT, REFERRAL_CODE);
+    }
+
+    /////////////////////////////////////
+    //              borrow             //
+    /////////////////////////////////////
+
+    // Alice deposits 100 DAI as collateral. Bob supplies 1 WETH, giving the
+    // WETH reserve enough liquidity for Alice to borrow 0.02 WETH.
+    //
+    // 1 ETH = 2,000 DAI, so Alice's collateral is worth 0.05 ETH. Since DAI
+    // has a 75% LTV, she can borrow up to 0.0375 ETH worth of assets. Her
+    // 0.02 WETH borrow plus its 0.25% origination fee remains safely
+    // collateralized.
+    function testUserCanBorrowAtVariableRateUsingDepositedCollateral() external {
+        uint256 wethLiquidity = 1 ether;
+        uint256 borrowAmount = 0.02 ether;
+        uint256 expectedBorrowFee = 0.00005 ether;
+
+        vm.startPrank(user);
+        dai.approve(address(core), DEPOSIT_AMOUNT);
+        pool.deposit(address(dai), DEPOSIT_AMOUNT, REFERRAL_CODE);
+        vm.stopPrank();
+
+        weth.mint(secondUser, wethLiquidity);
+        vm.startPrank(secondUser);
+        weth.approve(address(core), wethLiquidity);
+        pool.deposit(address(weth), wethLiquidity, REFERRAL_CODE);
+        vm.stopPrank();
+
+        vm.prank(user);
+        pool.borrow(address(weth), borrowAmount, uint256(CoreLibrary.InterestRateMode.VARIABLE), REFERRAL_CODE);
+
+        // The borrowed WETH is transferred from the core to Alice.
+        assertEq(weth.balanceOf(user), borrowAmount);
+
+        // Alice has variable-rate debt equal to the amount borrowed.
+        (uint256 principalBorrowBalance, uint256 compoundedBorrowBalance,) = core.getUserBorrowBalances(address(weth), user);
+        assertEq(principalBorrowBalance, borrowAmount);
+        assertEq(compoundedBorrowBalance, borrowAmount);
+        assertEq(
+            uint256(core.getUserCurrentBorrowRateMode(address(weth), user)), uint256(CoreLibrary.InterestRateMode.VARIABLE)
+        );
+
+        // Her DAI remains deposited and continues to be used as collateral.
+        assertEq(aDai.balanceOf(user), DEPOSIT_AMOUNT);
+        (,,, bool usesDaiAsCollateral) = core.getUserBasicReserveData(address(dai), user);
+        assertTrue(usesDaiAsCollateral);
+
+        // The fee is recorded on Alice's WETH borrow position.
+        (,, uint256 originationFee,) = core.getUserBasicReserveData(address(weth), user);
+        assertEq(originationFee, expectedBorrowFee);
+
+        // The borrowed WETH leaves the reserve, reducing available liquidity.
+        assertEq(core.getReserveAvailableLiquidity(address(weth)), wethLiquidity - borrowAmount);
+        assertEq(weth.balanceOf(address(core)), wethLiquidity - borrowAmount);
     }
 }
