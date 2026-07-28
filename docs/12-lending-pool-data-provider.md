@@ -24,6 +24,7 @@ weighted average LTV
 weighted average liquidation threshold
 health factor
 whether a user can safely reduce an aToken balance
+collateral required for a new borrow
 ```
 
 A useful mental model is:
@@ -69,12 +70,13 @@ This makes the protocol easier to reason about as borrowing, collateral manageme
 
 # Main Responsibilities
 
-The current implementation of `LendingPoolDataProvider` has three main responsibilities:
+The current implementation of `LendingPoolDataProvider` has four main responsibilities:
 
 ```text
 1. Calculate a user's global position across all reserves.
 2. Calculate a user's health factor.
 3. Check whether decreasing a user's aToken balance keeps the position healthy.
+4. Calculate the collateral required to cover a new borrow.
 ```
 
 This contract becomes especially important once the protocol supports borrowing, collateral checks, redemptions, transfers, and liquidations.
@@ -817,3 +819,80 @@ healthFactor = 2.38e18
 Alice is safely above the liquidation threshold.
 
 
+# Collateral Needed for a New Borrow
+
+## `calculateCollateralNeededInETH`
+
+```solidity
+function calculateCollateralNeededInETH(
+    address _reserve,
+    uint256 _amount,
+    uint256 _fee,
+    uint256 _userCurrentBorrowBalanceETH,
+    uint256 _userCurrentFeesETH,
+    uint256 _userCurrentLtv
+) external view returns (uint256)
+```
+
+This function calculates the minimum total collateral, denominated in ETH, that a user must have after taking a new borrow.
+
+`LendingPool.borrow()` uses it to determine whether the user's collateral is sufficient to cover their existing debt, fees, and the new borrow.
+
+The calculation includes all debt the user would owe after the borrow:
+
+```text
+existing borrow balance in ETH
++ existing origination fees in ETH
++ requested borrow amount in ETH
++ fee for the requested borrow in ETH
+```
+
+The requested amount and its new fee are expressed in units of the asset being borrowed (whose address is `_reserve`). The function first converts them to ETH using the reserve’s decimals and the price oracle:
+
+```text
+requestedBorrowAmountETH =
+    asset price in ETH * (_amount + _fee) / 10^reserveDecimals
+```
+
+It then divides the resulting total debt by the user's weighted average LTV:
+
+```text
+collateralNeededInETH =
+    (existing debt + existing fees + requested borrow and fee in ETH)
+    * 100
+    / current LTV
+```
+
+LTV is stored as a percentage, so an LTV of `75` means the user may borrow up to `75%` of their collateral value. Dividing by `75` and multiplying by `100` reverses that relationship to find the collateral required for a given debt.
+
+### Example
+
+Assume the user has a weighted average LTV of `75%` and already owes:
+
+```text
+existing borrow balance = 0.5 ETH
+existing fees           = 0.05 ETH
+```
+
+They want to borrow `1,000 DAI`. DAI has `18` decimals, its oracle price is `0.0005 ETH`, and the new origination fee is `10 DAI`.
+
+First, convert the new borrow plus fee to ETH:
+
+```text
+(1,000 DAI + 10 DAI) * 0.0005 ETH per DAI
+= 0.505 ETH
+```
+
+Then calculate the total debt after the borrow:
+
+```text
+0.5 ETH + 0.05 ETH + 0.505 ETH = 1.055 ETH
+```
+
+Finally, calculate the collateral required at a `75%` LTV:
+
+```text
+1.055 ETH * 100 / 75 = 1.406666666666666666 ETH
+```
+
+Therefore, the user needs at least `1.406666666666666666 ETH` of eligible collateral. A user with `1.4 ETH` of collateral cannot complete the borrow, while a user with `1.5 ETH` can, assuming the earlier health-factor checks pass.
