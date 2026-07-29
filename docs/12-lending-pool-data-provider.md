@@ -81,80 +81,6 @@ The current implementation of `LendingPoolDataProvider` has four main responsibi
 
 This contract becomes especially important once the protocol supports borrowing, collateral checks, redemptions, transfers, and liquidations.
 
-# Protocol Relationships
-
-## LendingPoolAddressesProvider
-
-The data provider receives the addresses provider in the constructor:
-
-```solidity
-constructor(address _addressProvider)
-```
-
-It uses the addresses provider to find:
-
-```text
-LendingPoolCore
-PriceOracle
-```
-
-The data provider stores the `LendingPoolCore` reference during construction, and it resolves the price oracle when it needs asset prices.
-
-## LendingPoolCore
-
-`LendingPoolCore` is the source of reserve and user accounting data.
-
-The data provider calls it to read:
-
-```text
-the list of reserves
-reserve decimals
-reserve LTV
-reserve liquidation threshold
-whether the reserve can be used as collateral
-the user's deposited balance
-the user's compounded borrow balance
-the user's origination fee
-whether the user enabled the reserve as collateral
-```
-
-This keeps `LendingPoolCore` focused on storing state, while `LendingPoolDataProvider` performs the heavier cross-reserve calculations.
-
-## PriceOracle
-
-The data provider uses the price oracle to convert each reserve balance into ETH terms.
-
-For example:
-
-```text
-user balance = 1000 DAI
-DAI price = 0.0005 ETH
-
-balance in ETH = 0.5 ETH
-```
-
-Using one common unit is necessary because a user's position can contain many different assets.
-
-## AToken
-
-`AToken` uses the data provider when checking whether a user's aToken balance can be reduced:
-
-```solidity
-function isTransferAllowed(
-    address _user,
-    uint256 _amount
-) public view returns (bool) {
-    return i_dataProvider.balanceDecreaseAllowed(
-        i_underlyingAssetAddress,
-        _user,
-        _amount
-    );
-}
-```
-
-This is important because transferring or redeeming aTokens can remove collateral from the user's account.
-
-If the user has debt, removing collateral could push their health factor below `1`.
 
 # Stored State
 
@@ -181,25 +107,6 @@ health factor >= 1.0 -> position is safe
 health factor < 1.0  -> position can be liquidated
 ```
 
-## `i_addressesProvider`
-
-```solidity
-LendingPoolAddressesProvider private i_addressesProvider;
-```
-
-Stores the protocol addresses provider.
-
-The data provider uses it to resolve protocol dependencies such as the price oracle.
-
-## `i_core`
-
-```solidity
-LendingPoolCore private i_core;
-```
-
-Stores the `LendingPoolCore` contract.
-
-The data provider uses it to read reserve configuration and user reserve data.
 
 # Local Variable Structs
 
@@ -250,33 +157,6 @@ collateral flags
 current reserve address
 ```
 
-# Constructor
-
-```solidity
-constructor(address _addressProvider)
-```
-
-The constructor initializes the data provider.
-
-It performs two safety checks:
-
-```text
-1. The addresses provider cannot be the zero address.
-2. The LendingPoolCore address returned by the provider cannot be the zero address.
-```
-
-If either address is invalid, the constructor reverts with:
-
-```solidity
-LendingPoolDataProvider__ZeroAddress()
-```
-
-After validation, it stores:
-
-```text
-the addresses provider
-the LendingPoolCore reference
-```
 
 # Health Factor Calculation
 

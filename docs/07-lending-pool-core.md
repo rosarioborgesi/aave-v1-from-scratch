@@ -35,105 +35,6 @@ The current implementation of `LendingPoolCore` has four main responsibilities:
 
 It also manages reserve initialization and exposes read functions used by other protocol components.
 
-# Protocol Relationships
-
-## LendingPool
-
-`LendingPool` is the user-facing entry point.
-
-For a deposit, it:
-
-```text
-1. validates the request;
-2. calls LendingPoolCore.updateStateOnDeposit();
-3. mints aTokens;
-4. calls LendingPoolCore.transferToReserve().
-```
-
-For a redeem, it:
-
-```text
-1. validates that the user can withdraw the requested liquidity;
-2. burns the user's aTokens;
-3. calls LendingPoolCore.updateStateOnRedeem();
-4. calls LendingPoolCore.transferToUser().
-```
-
-## LendingPoolConfigurator
-
-`LendingPoolConfigurator` performs administrative reserve operations such as:
-
-```text
-initializing a reserve
-removing the most recently added reserve
-```
-
-## CoreLibrary
-
-`LendingPoolCore` stores `ReserveData` and `UserReserveData`, while `CoreLibrary` performs the interest and index calculations on those structs.
-
-## InterestRateStrategy
-
-Every reserve has an interest-rate strategy contract.
-
-`LendingPoolCore` supplies the reserve state to that strategy and stores the returned:
-
-```text
-liquidity rate
-stable borrow rate
-variable borrow rate
-```
-
-## AToken
-
-Each reserve has an associated aToken.
-
-The aToken represents a user's supplied position and uses the reserve normalized income exposed by `LendingPoolCore` to calculate the current interest-bearing balance.
-
-# Access Control
-
-## `onlyLendingPool`
-
-```solidity
-modifier onlyLendingPool() {
-    if (msg.sender != i_addressesProvider.getLendingPool()) {
-        revert LendingPoolCore__OnlyLendingPool();
-    }
-    _;
-}
-```
-
-Only the current `LendingPool` registered in the addresses provider can call operational functions such as:
-
-```text
-updateStateOnDeposit()
-updateStateOnRedeem()
-updateStateOnBorrow()
-transferToReserve()
-transferToUser()
-setUserUseReserveAsCollateral()
-```
-
-This prevents users and unrelated contracts from directly changing accounting state or transferring funds through the core.
-
-## `onlyLendingPoolConfigurator`
-
-```solidity
-modifier onlyLendingPoolConfigurator() {
-    if (msg.sender != i_addressesProvider.getLendingPoolConfigurator()) {
-        revert LendingPoolCore__OnlyLendingPoolConfigurator();
-    }
-    _;
-}
-```
-
-Only `LendingPoolConfigurator` can perform reserve-management actions such as:
-
-```text
-initReserve()
-removeLastAddedReserve()
-```
-
 # Stored State
 
 ## `s_reserves`
@@ -216,23 +117,6 @@ mapping(address reserve => bool isAdded)
 
 This mapping provides a constant-time membership check and prevents duplicate entries in `s_reservesList`.
 
-# Constructor
-
-```solidity
-constructor(address _addressesProvider) {
-    i_addressesProvider =
-        LendingPoolAddressesProvider(_addressesProvider);
-
-    i_lendingPoolAddress =
-        i_addressesProvider.getLendingPool();
-}
-```
-
-The constructor stores the `LendingPoolAddressesProvider`.
-
-The active LendingPool and LendingPoolConfigurator addresses are later resolved through this provider.
-
-The access-control modifiers resolve the current addresses dynamically through the provider. This lets the configured LendingPool and configurator be updated without redeploying the core.
 
 # Deposit State Update
 
