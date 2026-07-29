@@ -397,7 +397,7 @@ contract LendingPoolDataProviderUnitTest is Test {
         assertLt(expectedHealthFactor, HEALTH_FACTOR_LIQUIDATION_THRESHOLD);
         assertTrue(healthFactorBelowThreshold);
     }
-    
+
     ////////////////////////////////
     //    balanceDecreaseAllowed  //
     ////////////////////////////////
@@ -544,8 +544,9 @@ contract LendingPoolDataProviderUnitTest is Test {
         uint256 newBorrowFee = 100_000; // 0.1 token
 
         // This test represents a user with no existing debt (currentBorrowBalanceETH = 0) or fees (currentFeesETH = 0), using collateral with an 80% LTV
-        uint256 collateralNeededInETH =
-            dataProvider.calculateCollateralNeededInETH(reserve, amountToBorrow, newBorrowFee, currentBorrowBalanceETH, currentFeesETH, 80);
+        uint256 collateralNeededInETH = dataProvider.calculateCollateralNeededInETH(
+            reserve, amountToBorrow, newBorrowFee, currentBorrowBalanceETH, currentFeesETH, 80
+        );
 
         // new debt in ETH = (amountToBorrow + newBorrowFee) * token price in ETH
         // new debt in ETH = 2.1 tokens * 0.5 ETH = 1.05 ETH.
