@@ -1927,3 +1927,29 @@ Alice deposits `1,000 DAI` and enables DAI as collateral. If she then requests a
 The function returns `false`: Alice is attempting a stable borrow of the same asset she is using as collateral, and the requested amount does not exceed her DAI balance. If Alice instead borrows another asset, such as USDC, her DAI deposit is not used by this specific same-asset check.
 
 This is not the complete stable-borrow validation. `LendingPool` also checks the stable borrowing cap relative to available liquidity, alongside the general borrow validations such as collateral capacity and available liquidity.
+
+## `getReserveUtilizationRate`
+
+```solidity
+function getReserveUtilizationRate(
+    address _reserve
+) external view returns (uint256)
+```
+
+Returns the share of the reserve's supplied assets that is currently borrowed, expressed in ray (`1e27`):
+
+```text
+utilization = total borrows / (available liquidity + total borrows)
+```
+
+`available liquidity` is the asset balance held by `LendingPoolCore`, while `total borrows` includes both stable and variable debt. `rayDiv()` performs the division using ray precision, so a result of `0.80 ray` represents 80% utilization.
+
+The explicit zero-borrow check returns `0` before dividing. Besides accurately describing an unused reserve, it avoids a zero-denominator when the reserve has neither borrows nor liquidity.
+
+For example, a reserve with `800 DAI` borrowed and `200 DAI` available has:
+
+```text
+800 / (200 + 800) = 0.80
+```
+
+so the function returns `0.80 ray`. This getter only reports the current ratio; it does not update reserve state or interest rates.
