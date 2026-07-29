@@ -41,9 +41,12 @@ contract LendingPoolCoreHarness is LendingPoolCore {
         s_reserves[reserve].borrowingEnabled = borrowingEnabled;
     }
 
-    function setReserveConfiguration(address reserve, uint256 baseLtv, uint256 liquidationThreshold, bool usageAsCollateral)
-        external
-    {
+    function setReserveConfiguration(
+        address reserve,
+        uint256 baseLtv,
+        uint256 liquidationThreshold,
+        bool usageAsCollateral
+    ) external {
         s_reserves[reserve].baseLTVasCollateral = baseLtv;
         s_reserves[reserve].liquidationThreshold = liquidationThreshold;
         s_reserves[reserve].usageAsCollateralEnabled = usageAsCollateral;
@@ -91,7 +94,9 @@ contract LendingPoolIntegrationTest is Test {
         weth = new MockERC20("Mock WETH", "WETH");
 
         aDai = new AToken(address(addressesProvider), address(dai), dai.decimals(), "Aave interest bearing DAI", "aDAI");
-        aWeth = new AToken(address(addressesProvider), address(weth), weth.decimals(), "Aave interest bearing WETH", "aWETH");
+        aWeth = new AToken(
+            address(addressesProvider), address(weth), weth.decimals(), "Aave interest bearing WETH", "aWETH"
+        );
 
         interestRateStrategy = new MockReserveInterestRateStrategy();
         priceOracle = new MockPriceOracle();
@@ -576,11 +581,13 @@ contract LendingPoolIntegrationTest is Test {
         assertEq(weth.balanceOf(user), borrowAmount);
 
         // Alice has variable-rate debt equal to the amount borrowed.
-        (uint256 principalBorrowBalance, uint256 compoundedBorrowBalance,) = core.getUserBorrowBalances(address(weth), user);
+        (uint256 principalBorrowBalance, uint256 compoundedBorrowBalance,) =
+            core.getUserBorrowBalances(address(weth), user);
         assertEq(principalBorrowBalance, borrowAmount);
         assertEq(compoundedBorrowBalance, borrowAmount);
         assertEq(
-            uint256(core.getUserCurrentBorrowRateMode(address(weth), user)), uint256(CoreLibrary.InterestRateMode.VARIABLE)
+            uint256(core.getUserCurrentBorrowRateMode(address(weth), user)),
+            uint256(CoreLibrary.InterestRateMode.VARIABLE)
         );
 
         // Her DAI remains deposited and continues to be used as collateral.
