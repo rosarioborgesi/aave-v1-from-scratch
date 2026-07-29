@@ -64,14 +64,6 @@ contract LendingPoolCoreHarness is LendingPoolCore {
         s_reserves[_reserve].borrowingEnabled = _borrowingEnabled;
     }
 
-    function setReserveStableBorrowRateEnabled(address _reserve, bool _stableBorrowRateEnabled) external {
-        s_reserves[_reserve].isStableBorrowRateEnabled = _stableBorrowRateEnabled;
-    }
-
-    function setReserveDecimals(address _reserve, uint256 _decimals) external {
-        s_reserves[_reserve].decimals = _decimals;
-    }
-
     function setReserveConfiguration(
         address _reserve,
         uint256 _baseLTVasCollateral,
@@ -1558,7 +1550,7 @@ contract LendingPoolCoreUnitTest is Test {
     // variable index at zero while adding the new debt, accrued interest, and fee. (`STABLE` -> `STABLE`)
     function testUpdateUserStateOnBorrowUpdatesExistingStablePosition() external {
         // Use the reserve's new stable rate, which replaces the user's older stable rate.
-        uint256 newStableRate = 6e25;  // 6% per year in ray (0.06 x 1e27)
+        uint256 newStableRate = 6e25; // 6% per year in ray (0.06 x 1e27)
         // Configure the reserve with the rate the user should receive for the new stable borrow.
         core.setReserveRates(address(token), 0, newStableRate, 0);
 
@@ -2265,9 +2257,8 @@ contract LendingPoolCoreUnitTest is Test {
 
         // Calculate the same compounded factor used for a stable borrow balance. The balance
         // increase is the one-year growth on the 100-token stored principal at the personal 5% rate.
-        uint256 expectedBalanceIncrease = uint256(100 ether).rayMul(
-            (RAY + uint256(5e25) / 365 days).rayPow(365 days)
-        ) - 100 ether;
+        uint256 expectedBalanceIncrease =
+            uint256(100 ether).rayMul((RAY + uint256(5e25) / 365 days).rayPow(365 days)) - 100 ether;
         // The complete updated position is old principal + materialized interest + new borrow.
         uint256 expectedPrincipal = 100 ether + expectedBalanceIncrease + amountBorrowed;
 
@@ -2278,22 +2269,15 @@ contract LendingPoolCoreUnitTest is Test {
             address(strategy),
             abi.encodeCall(
                 IReserveInterestRateStrategy.calculateInterestRates,
-                (
-                    address(token),
-                    1_000 ether - amountBorrowed,
-                    expectedPrincipal,
-                    0,
-                    currentStableBorrowRate
-                )
+                (address(token), 1_000 ether - amountBorrowed, expectedPrincipal, 0, currentStableBorrowRate)
             )
         );
 
         // Run the full borrow flow as the LendingPool. The returned rate is the user's stored
         // stable rate, rather than the strategy's newly returned 8% stable rate.
         vm.prank(lendingPool);
-        (uint256 userBorrowRate, uint256 balanceIncrease) = core.updateStateOnBorrow(
-            address(token), user, amountBorrowed, 1 ether, CoreLibrary.InterestRateMode.STABLE
-        );
+        (uint256 userBorrowRate, uint256 balanceIncrease) =
+            core.updateStateOnBorrow(address(token), user, amountBorrowed, 1 ether, CoreLibrary.InterestRateMode.STABLE);
 
         // Read storage after the reserve and user updates have both completed.
         CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
@@ -2481,9 +2465,8 @@ contract LendingPoolCoreUnitTest is Test {
         // compoundedInterest = (1 ray + ratePerSecond) ^ (365 days)
         // compoundedBalance = 100 tokens * compoundedInterest
         // balanceIncrease = compoundedBalance - 100 tokens
-        uint256 expectedBalanceIncrease = uint256(100 ether).rayMul(
-            (RAY + oldStableBorrowRate / 365 days).rayPow(365 days)
-        ) - 100 ether;
+        uint256 expectedBalanceIncrease =
+            uint256(100 ether).rayMul((RAY + oldStableBorrowRate / 365 days).rayPow(365 days)) - 100 ether;
         uint256 expectedUserPrincipal = 100 ether + expectedBalanceIncrease + amountBorrowed;
         // Pre-existing variable borrowers cause the reserve's variable index to compound at 10%.
         //
@@ -2491,9 +2474,7 @@ contract LendingPoolCoreUnitTest is Test {
         // compoundedInterest = (1 ray + ratePerSecond) ^ (365 days)
         // newVariableBorrowIndex = previousVariableBorrowIndex * compoundedInterest
         //                         = 1 ray * compoundedInterest
-        uint256 expectedVariableBorrowIndex = RAY.rayMul(
-            (RAY + uint256(10e25) / 365 days).rayPow(365 days)
-        );
+        uint256 expectedVariableBorrowIndex = RAY.rayMul((RAY + uint256(10e25) / 365 days).rayPow(365 days));
 
         // First remove the user's old 100-token stable principal. Then add their complete
         // variable position: old principal + accrued stable interest + new borrow. The strategy
@@ -2540,7 +2521,7 @@ contract LendingPoolCoreUnitTest is Test {
         assertEq(userData.stableBorrowRate, 0);
         assertEq(userData.lastVariableBorrowCumulativeIndex, expectedVariableBorrowIndex);
         assertEq(userData.lastUpdateTimestamp, updateTimestamp);
-        
+
         assertTrue(userData.useAsCollateral);
     }
 
@@ -2585,9 +2566,8 @@ contract LendingPoolCoreUnitTest is Test {
         // compoundedInterest = (1 ray + ratePerSecond) ^ (365 days)
         // compoundedBalance = 100 tokens * compoundedInterest
         // balanceIncrease = compoundedBalance - 100 tokens
-        uint256 expectedBalanceIncrease = uint256(100 ether).rayMul(
-            (RAY + oldVariableBorrowRate / 365 days).rayPow(365 days)
-        ) - 100 ether;
+        uint256 expectedBalanceIncrease =
+            uint256(100 ether).rayMul((RAY + oldVariableBorrowRate / 365 days).rayPow(365 days)) - 100 ether;
 
         // The complete updated stable position contains old variable principal, its materialized
         // variable interest, and the 50-token new stable borrow. This position then combines with
@@ -2602,10 +2582,9 @@ contract LendingPoolCoreUnitTest is Test {
         //
         // Debt amounts are stored in wad precision, while rates use ray precision. wadToRay()
         // converts the amounts before rayMul()/rayDiv() perform the protocol's rounded ray math.
-        uint256 expectedAverageStableRate = (
-            uint256(200 ether).wadToRay().rayMul(7e25)
-                + updatedUserPrincipal.wadToRay().rayMul(currentStableBorrowRate)
-        ).rayDiv(expectedStableDebt.wadToRay());
+        uint256 expectedAverageStableRate = (uint256(200 ether).wadToRay().rayMul(7e25)
+                + updatedUserPrincipal.wadToRay().rayMul(currentStableBorrowRate))
+        .rayDiv(expectedStableDebt.wadToRay());
         // The strategy returns these rates after the mode switch for future reserve accrual.
         // This scope lets the setup-only values leave the stack before the borrow call below.
         {
@@ -2628,9 +2607,8 @@ contract LendingPoolCoreUnitTest is Test {
         // The mode switch moves the user's old variable principal, its accrued variable interest,
         // and the 50-token borrow into stable debt. The 1-token new fee remains separate from principal.
         vm.prank(lendingPool);
-        (uint256 userBorrowRate, uint256 balanceIncrease) = core.updateStateOnBorrow(
-            address(token), user, amountBorrowed, 1 ether, CoreLibrary.InterestRateMode.STABLE
-        );
+        (uint256 userBorrowRate, uint256 balanceIncrease) =
+            core.updateStateOnBorrow(address(token), user, amountBorrowed, 1 ether, CoreLibrary.InterestRateMode.STABLE);
 
         CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
         CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
@@ -2643,9 +2621,7 @@ contract LendingPoolCoreUnitTest is Test {
         // compoundedInterest = (1 ray + ratePerSecond) ^ (365 days)
         // newVariableBorrowIndex = previousVariableBorrowIndex * compoundedInterest
         //                         = 1 ray * compoundedInterest
-        uint256 expectedVariableBorrowIndex = RAY.rayMul(
-            (RAY + oldVariableBorrowRate / 365 days).rayPow(365 days)
-        );
+        uint256 expectedVariableBorrowIndex = RAY.rayMul((RAY + oldVariableBorrowRate / 365 days).rayPow(365 days));
         assertEq(userBorrowRate, currentStableBorrowRate);
         assertEq(balanceIncrease, expectedBalanceIncrease);
 
@@ -2705,6 +2681,7 @@ contract LendingPoolCoreUnitTest is Test {
 
         // Write a USDC-like decimal value directly through the harness so this test covers only
         // getReserveDecimals reading reserve storage, without depending on reserve initialization.
+        vm.prank(configurator);
         core.setReserveDecimals(address(token), decimals);
 
         assertEq(core.getReserveDecimals(address(token)), decimals);
@@ -2824,7 +2801,8 @@ contract LendingPoolCoreUnitTest is Test {
     // Once stable borrowing is enabled, a user who is not using this reserve as collateral passes
     // the same-asset restriction without needing to read an aToken balance.
     function testIsUserAllowedToBorrowAtStableReturnsTrueWhenUserDoesNotUseReserveAsCollateral() external {
-        core.setReserveStableBorrowRateEnabled(address(token), true);
+        vm.prank(configurator);
+        core.enableReserveStableBorrowRate(address(token));
         core.setReserveConfiguration(address(token), 0, 0, true);
 
         assertTrue(core.isUserAllowedToBorrowAtStable(address(token), user, 1 ether));
@@ -2833,7 +2811,8 @@ contract LendingPoolCoreUnitTest is Test {
     // The same-asset restriction does not apply when this reserve is not configured as collateral,
     // even when the user has marked their position as collateral.
     function testIsUserAllowedToBorrowAtStableReturnsTrueWhenReserveCannotBeUsedAsCollateral() external {
-        core.setReserveStableBorrowRateEnabled(address(token), true);
+        vm.prank(configurator);
+        core.enableReserveStableBorrowRate(address(token));
         core.setUserReserveData(
             user,
             address(token),
@@ -2859,7 +2838,8 @@ contract LendingPoolCoreUnitTest is Test {
         MockERC20 mockAToken = _initReserveWithMockAToken(address(token));
         uint256 userUnderlyingBalance = 100 ether;
 
-        core.setReserveStableBorrowRateEnabled(address(token), true);
+        vm.prank(configurator);
+        core.enableReserveStableBorrowRate(address(token));
         core.setReserveConfiguration(address(token), 0, 0, true);
         core.setUserReserveData(
             user,
