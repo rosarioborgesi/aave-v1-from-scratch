@@ -1,4 +1,4 @@
-# Loan-to-Value, Health Factor, and Liquidation
+# Loan-to-Value, Health Factor, Liquidation, Utilization Rate
 
 ## Overview
 
@@ -549,12 +549,41 @@ The collateral-decrease condition is intentionally stricter:
 healthFactorAfterDecrease > 1e18
 ```
 
-## Final Mental Model
 
-Remember the flow in this order:
+## Utilization Rate
 
-1. **LTV limits the debt the user is allowed to create.**
-2. **The liquidation threshold determines the collateral protecting that debt.**
-3. **The health factor compares protected collateral with debt and fees.**
-4. **Below `1`, the position can be liquidated.**
+The utilization rate shows what percentage of a reserve’s deposited liquidity is currently being borrowed.
+
+$$
+U = \frac{\text{Total Borrows}}{\text{Available Liquidity} + \text{Total Borrows}}
+$$
+
+Where:
+
+* **Total Borrows** is the sum of all stable-rate and variable-rate debt in the reserve.
+* **Available Liquidity** is the amount of the asset still held by the pool and available for users to borrow or redeem.
+* **Available Liquidity + Total Borrows** represents the reserve’s total supplied liquidity.
+
+If the reserve has no active borrows, its utilization rate is `0`.
+
+The value is returned in **RAY precision** (`1e27`). This is why the function uses `rayDiv()` instead of normal Solidity division.
+
+### Example
+
+Assume a DAI reserve has received **1,000 DAI** in deposits.
+
+* **700 DAI** has been borrowed.
+* **300 DAI** remains available in the pool.
+
+$$
+U = \frac{700}{300 + 700} = \frac{700}{1000} = 70%
+$$
+
+The utilization rate is therefore:
+
+```solidity
+0.7e27
+```
+
+As utilization rises, less liquidity remains available in the reserve. Aave’s interest-rate strategy uses this value to increase borrowing rates, encouraging repayments and new deposits when liquidity becomes scarce.
 
