@@ -339,6 +339,146 @@ contract LendingPoolCore {
         return (_getUserCurrentBorrowRate(_reserve, _user), balanceIncrease);
     }
 
+    /**
+    * @dev updates the address of the interest rate strategy contract
+    * @param _reserve the address of the reserve
+    * @param _rateStrategyAddress the address of the interest rate strategy contract
+    **/
+    function setReserveInterestRateStrategyAddress(address _reserve, address _rateStrategyAddress) external onlyLendingPoolConfigurator {
+        s_reserves[_reserve].interestRateStrategyAddress = _rateStrategyAddress;
+    }
+
+    /**
+    * @dev enables borrowing on a reserve. Also sets the stable rate borrowing
+    * @param _reserve the address of the reserve
+    * @param _stableBorrowRateEnabled true if the stable rate needs to be enabled, false otherwise
+    **/
+    function enableBorrowingOnReserve(address _reserve, bool _stableBorrowRateEnabled) external onlyLendingPoolConfigurator {
+        s_reserves[_reserve].enableBorrowing(_stableBorrowRateEnabled);
+    }
+
+    /**
+    * @dev disables borrowing on a reserve
+    * @param _reserve the address of the reserve
+    **/
+    function disbaleBorrowingOnReserve(address _reserve) external onlyLendingPoolConfigurator {
+        s_reserves[_reserve].disableBorrowing();
+    }
+
+    /**
+    * @dev enables a reserve to be used as collateral
+    * @param _reserve the address of the reserve
+    **/
+    function enableReserveAsCollateral(
+        address _reserve,
+        uint256 _baseLTVasCollateral,
+        uint256 _liquidationThreshold,
+        uint256 _liquidationBonus
+    ) external onlyLendingPoolConfigurator {
+        s_reserves[_reserve].enableAsCollateral(
+            _baseLTVasCollateral,
+            _liquidationThreshold,
+            _liquidationBonus
+        );
+    }
+
+    /**
+    * @dev disables a reserve to be used as collateral
+    * @param _reserve the address of the reserve
+    **/
+    function disableReserveAsCollateral(address _reserve) external onlyLendingPoolConfigurator {
+        s_reserves[_reserve].disableAsCollateral();
+    }
+
+    /**
+    * @dev enable the stable borrow rate mode on a reserve
+    * @param _reserve the address of the reserve
+    **/
+    function enableReserveStableBorrowRate(address _reserve) external onlyLendingPoolConfigurator {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        reserve.isStableBorrowRateEnabled = true;
+    }
+
+    /**
+    * @dev disable the stable borrow rate mode on a reserve
+    * @param _reserve the address of the reserve
+    **/
+    function disableReserveStableBorrowRate(address _reserve) external onlyLendingPoolConfigurator {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        reserve.isStableBorrowRateEnabled = false;
+    }
+
+    /**
+    * @dev activates a reserve
+    * @param _reserve the address of the reserve
+    **/
+    function activateReserve(address _reserve) external onlyLendingPoolConfigurator {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+
+        if (reserve.lastLiquidityCumulativeIndex == 0 || reserve.lastVariableBorrowCumulativeIndex == 0) {
+            revert LendingPoolCore__ReserveNotInitializedYet();
+        }
+        reserve.isActive = true;
+    }
+
+    /**
+    * @dev deactivates a reserve
+    * @param _reserve the address of the reserve
+    **/
+    function deactivateReserve(address _reserve) external onlyLendingPoolConfigurator() {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        reserve.isActive = false;
+    }
+
+    /**
+    * @notice allows the configurator to freeze the reserve.
+    * A freezed reserve does not allow any action apart from repay, redeem, liquidationCall, rebalance.
+    * @param _reserve the address of the reserve
+    **/
+    function freezeReserve(address _reserve) external onlyLendingPoolConfigurator {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        reserve.isFreezed = true; 
+    }
+
+    /**
+    * @notice allows the configurator to unfreeze the reserve. A unfreezed reserve allows any action to be executed.
+    * @param _reserve the address of the reserve
+    **/
+    function unfreezeReserve(address _reserve) external onlyLendingPoolConfigurator {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        reserve.isFreezed = false;
+    }
+
+    /**
+    * @notice allows the configurator to update the loan to value of a reserve
+    * @param _reserve the address of the reserve
+    * @param _ltv the new loan to value
+    **/
+    function setReserveBaseLTVasCollateral(address _reserve, uint256 _ltv) external onlyLendingPoolConfigurator {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        reserve.baseLTVasCollateral = _ltv;
+    }
+
+    /**
+    * @notice allows the configurator to update the liquidation threshold of a reserve
+    * @param _reserve the address of the reserve
+    * @param _threshold the new liquidation threshold
+    **/
+    function setReserveLiquidationThreshold(address _reserve, uint256 _threshold) external onlyLendingPoolConfigurator {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        reserve.liquidationThreshold = _threshold;
+    }
+
+    /**
+    * @notice allows the configurator to update the liquidation bonus of a reserve
+    * @param _reserve the address of the reserve
+    * @param _bonus the new liquidation bonus
+    **/
+    function setReserveLiquidationBonus(address _reserve, uint256 _bonus) external onlyLendingPoolConfigurator {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        reserve.liquidationBonus = _bonus;
+    }
+
     ////////////////////////////////
     //       Public Functions     //
     ////////////////////////////////
@@ -863,5 +1003,195 @@ contract LendingPoolCore {
         // 3. The requested stable borrow exceeds the user's underlying balance of this asset.
         return !user.useAsCollateral || !reserve.usageAsCollateralEnabled
             || _amount > getUserUnderlyingAssetBalance(_reserve, _user);
+    }
+
+    /**
+    * @dev gets the interest rate strategy contract address for the reserve
+    * @param _reserve the reserve address
+    * @return the address of the interest rate strategy contract
+    **/
+    function getReserveInterestRateStrategyAddress(address _reserve) external view returns (address) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        return reserve.interestRateStrategyAddress;
+    }
+
+    /**
+    * @dev gets the total liquidity in the reserve. The total liquidity is the balance of the core contract + total borrows
+    * @param _reserve the reserve address
+    * @return the total liquidity
+    **/
+    function getReserveTotalLiquidity(address _reserve) external view returns (uint256) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        return getReserveAvailableLiquidity(_reserve) + reserve.getTotalBorrows();
+    }
+
+    /**
+    * @dev gets the reserve total borrows stable
+    * @param _reserve the reserve address
+    * @return the total borrows stable
+    **/
+    function getReserveTotalBorrowsStable(address _reserve) external view returns (uint256) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        return reserve.totalBorrowsStable;
+    }
+
+    /**
+    * @dev gets the reserve total borrows variable
+    * @param _reserve the reserve address
+    * @return the total borrows variable
+    **/
+    function getReserveTotalBorrowsVariable(address _reserve) external view returns (uint256) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        return reserve.totalBorrowsVariable;
+    }
+
+
+    /**
+    * @dev gets the reserve liquidation threshold
+    * @param _reserve the reserve address
+    * @return the reserve liquidation threshold
+    **/
+    function getReserveLiquidationThreshold(address _reserve) external view returns (uint256) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        return reserve.liquidationThreshold;
+    }
+
+    /**
+    * @dev gets the reserve current variable borrow rate. Is the base variable borrow rate if the reserve is empty
+    * @param _reserve the reserve address
+    * @return the reserve current variable borrow rate
+    **/
+    function getReserveCurrentVariableBorrowRate(address _reserve) external view returns (uint256) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+
+        if(reserve.currentVariableBorrowRate == 0) {
+            return IReserveInterestRateStrategy(reserve.interestRateStrategyAddress)
+                .getVaseVariableBorrowRate();
+        }
+        return reserve.currentVariableBorrowRate;
+    }
+
+    /**
+    * @dev gets the reserve average stable borrow rate. The average stable rate is the weighted average
+    * of all the loans taken at stable rate.
+    * @param _reserve the reserve address
+    * @return the reserve current average borrow rate
+    **/
+    function getReserveCurrentAverageStableBorrowRate(address _reserve) external view returns (uint256) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        return reserve.currentAverageStableBorrowRate;
+    }
+
+    /**
+    * @dev gets the reserve liquidity cumulative index
+    * @param _reserve the reserve address
+    * @return the reserve liquidity cumulative index
+    **/
+    function getReserveLiquidityCumulativeIndex(address _reserve) external view returns (uint256) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        return reserve.lastLiquidityCumulativeIndex;
+    }
+
+    /**
+    * @dev gets the reserve variable borrow index
+    * @param _reserve the reserve address
+    * @return the reserve variable borrow index
+    **/
+    function getReserveVariableBorrowsCumulativeIndex(address _reserve) external view returns (uint256) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        return reserve.lastVariableBorrowCumulativeIndex;
+    }
+
+    /**
+    * @dev returns true if the reserve is enabled as collateral
+    * @param _reserve the reserve address
+    * @return true if the reserve is enabled as collateral, false otherwise
+    **/
+    function isReserveUsageAsCollateralEnabled(address _reserve) external view returns (bool) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        return reserve.usageAsCollateralEnabled;
+    }
+
+    /**
+    * @dev returns true if the stable rate is enabled on reserve
+    * @param _reserve the reserve address
+    * @return true if the stable rate is enabled on reserve, false otherwise
+    **/
+    function getReserveIsStableBorrowRateEnabled(address _reserve) external view returns (bool) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        return reserve.isStableBorrowRateEnabled;
+    }
+
+    /**
+    * @notice returns the timestamp of the last action on the reserve
+    * @param _reserve the reserve for which the information is needed
+    * @return the last updated timestamp of the reserve
+    **/
+    function getReserveLastUpdate(address _reserve) external view returns (uint40) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        return reserve.lastUpdateTimestamp;
+    }
+
+    /**
+    * @dev returns the utilization rate U of a specific reserve
+    * @param _reserve the reserve for which the information is needed
+    * @return the utilization rate in ray
+    **/
+    function getReserveUtilizationRate(address _reserve) external view returns (uint256) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+
+        uint256 totalBorrows = reserve.getTotalBorrows();
+
+        if (totalBorrows == 0) {
+            return 0;
+        }
+
+        uint256 availableLiquidity = getReserveAvailableLiquidity(_reserve);
+        // utilization = total borrows / (available liquidity + total borrows)
+        return totalBorrows.rayDiv(availableLiquidity + totalBorrows);
+    }
+
+    /**
+    * @param _reserve the address of the reserve for which the information is needed
+    * @param _user the address of the user for which the information is needed
+    * @return the origination fee for the user
+    **/
+    function getUserOriginationFee(address _reserve, address _user) external view returns (uint256) {
+        CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
+        return user.originationFee;
+    }
+
+    /**
+    * @dev the stable rate returned is 0 if the user is borrowing at variable or not borrowing at all
+    * @param _reserve the address of the reserve for which the information is needed
+    * @param _user the address of the user for which the information is needed
+    * @return the user stable rate
+    **/
+    function getUserCurrentStableBorrowRate(address _reserve, address _user) external view returns (uint256) {
+        CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
+        return user.stableBorrowRate;
+    }
+
+    /**
+    * @dev the variable borrow index of the user is 0 if the user is not borrowing or borrowing at stable
+    * @param _reserve the address of the reserve for which the information is needed
+    * @param _user the address of the user for which the information is needed
+    * @return the variable borrow index for the user
+    **/
+    function getUserVariableBorrowCumulativeIndex(address _reserve, address _user) external view returns (uint256) {
+        CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
+        return user.lastVariableBorrowCumulativeIndex;
+    }
+
+    /**
+    * @dev the variable borrow index of the user is 0 if the user is not borrowing or borrowing at stable
+    * @param _reserve the address of the reserve for which the information is needed
+    * @param _user the address of the user for which the information is needed
+    * @return the variable borrow index for the user
+    **/
+    function getUserLastUpdate(address _reserve, address _user) external view returns (uint256) {
+        CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
+        return user.rastUpdateTimestamp;
+
     }
 }
