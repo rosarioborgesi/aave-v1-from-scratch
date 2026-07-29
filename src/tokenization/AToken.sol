@@ -396,6 +396,11 @@ contract AToken is ERC20 {
         return i_underlyingAssetAddress;
     }
 
+    /**
+    * @dev returns the last index of the user, used to calculate the balance of the user
+    * @param _user address of the user
+    * @return the last user index
+    **/
     function getUserIndex(address _user) external view returns (uint256) {
         return s_userIndexes[_user];
     }
