@@ -2,44 +2,6 @@
 
 The `LendingPool` contract is the main user-facing entry point of the lending protocol.
 
-In the current implementation, it supports:
-
-```text
-deposits
-redemptions of underlying assets
-```
-
-When a user deposits an underlying asset or redeems it through an aToken,
-`LendingPool` coordinates the operation between:
-
-```text
-the user
-LendingPoolCore
-the reserve's AToken
-```
-
-The contract does not hold reserve assets directly.
-
-For deposits, it:
-
-```text
-validates the deposit
-updates the reserve state
-mints aTokens to the user
-transfers the underlying asset to LendingPoolCore
-emits the Deposit event
-```
-
-For redemptions, it:
-
-```text
-accepts calls only from the reserve's aToken
-validates the reserve and amount
-checks available liquidity
-updates the reserve state
-transfers the underlying asset from LendingPoolCore to the user
-emits the RedeemUnderlying event
-```
 
 # Contract Declaration
 
@@ -790,65 +752,249 @@ the whole transaction reverts if the transfer fails
 For the full redemption flow, including the aToken and data-provider checks, see
 [`docs/11-redeem.md`](./11-redeem.md).
 
-# View Functions
+# Borrowing Assets
 
-## `getLendingPoolCoreAddress`
+## `borrow`
 
 ```solidity
-function getLendingPoolCoreAddress()
+function borrow(
+    address _reserve,
+    uint256 _amount,
+    uint256 _interestRateMode,
+    uint16 _referralCode
+)
     external
-    view
-    returns (address)
-{
-    return address(i_core);
+    nonReentrant
+    onlyActiveReserve(_reserve)
+    onlyUnfreezedReserve(_reserve)
+    onlyAmountGreaterThanZero(_amount)
+```
+
+`borrow()` lets a user take underlying liquidity from a reserve against the
+value of collateral they have supplied. The borrowed asset is sent directly to
+`msg.sender`; no debt token is minted in this implementation. Instead,
+`LendingPoolCore` records the user's debt and the reserve's borrow accounting.
+
+The caller chooses one of the two supported interest-rate modes:
+
+```text
+1 = stable
+2 = variable
+```
+
+Before a loan can be created, the function checks that the reserve can lend,
+that sufficient liquidity exists, and that the caller's collateral can cover
+their existing debt, existing fees, and the requested borrow plus its new fee.
+
+The `nonReentrant`, active-reserve, unfrozen-reserve, and non-zero-amount
+modifiers run first. Unlike redemption, borrowing from a frozen reserve is not
+allowed because it would create new risk.
+
+The function then performs the following operations.
+
+# 1. Validate Borrowing Is Enabled and the Rate Mode
+
+```solidity
+if (!i_core.isReserveBorrowingEnabled(_reserve)) {
+    revert LendingPool__ReserveNotEnabledForBorrowing();
 }
 ```
 
-This function returns the configured `LendingPoolCore` address.
+Each reserve can independently enable or disable borrowing. An active reserve
+is therefore not necessarily borrowable.
 
-## `getLendingPoolAddressesProvider`
+The requested mode must be `STABLE` or `VARIABLE`:
 
 ```solidity
-function getLendingPoolAddressesProvider()
-    external
-    view
-    returns (address)
-{
-    return address(i_addressesProvider);
+if (
+    _interestRateMode != uint256(CoreLibrary.InterestRateMode.VARIABLE)
+        && _interestRateMode != uint256(CoreLibrary.InterestRateMode.STABLE)
+) {
+    revert LendingPool__InvalidInterestRateMode();
 }
 ```
 
-This function returns the configured `LendingPoolAddressesProvider` address.
+After validation, the numeric input is converted to the
+`CoreLibrary.InterestRateMode` enum used by the core.
 
-# Current Scope
+# 2. Check Reserve Liquidity
 
-The current `LendingPool` implementation includes:
+```solidity
+vars.availableLiquidity =
+    i_core.getReserveAvailableLiquidity(_reserve);
 
-```text
-deposit validation
-redeem validation
-active-reserve validation
-frozen-reserve validation
-zero-amount validation
-aToken-only redeem access control
-available-liquidity checks for redemptions
-reentrancy protection
-reserve-state updates
-aToken minting
-ERC20 and ETH deposit transfers
-ERC20 and ETH redeem transfers through LendingPoolCore
-deposit event emission
-redeem event emission
-protocol address getters
+if (vars.availableLiquidity < _amount) {
+    revert LendingPool__NotEnoughLiquidityInTheReserve();
+}
 ```
 
-The current contract does not yet include the other operations present in the original Aave V1 `LendingPool`, such as:
+The pool cannot lend tokens it does not currently hold. For example, a reserve
+with `80 DAI` available rejects a request to borrow `100 DAI`, even if the
+caller has enough collateral.
+
+# 3. Read and Validate the User's Position
+
+```solidity
+(
+    ,
+    vars.userCollateralBalanceETH,
+    vars.userBorrowBalanceETH,
+    vars.userTotalFeesETH,
+    vars.currentLtv,
+    vars.currentLiquidationThreshold,,
+    vars.healthFactorBelowThreshold
+) = i_dataProvider.calculateUserGlobalData(msg.sender);
+```
+
+`LendingPoolDataProvider` aggregates the user's position across every reserve
+and expresses collateral, debt, and fees in ETH using the price oracle. The
+function uses the user's collateral value, current borrow value, outstanding
+fees, weighted loan-to-value (LTV), and health status.
+
+```solidity
+if (vars.userCollateralBalanceETH == 0) {
+    revert LendingPool__CollateralBalanceIsZero();
+}
+
+if (vars.healthFactorBelowThreshold) {
+    revert LendingPool__HealthFactorBelowThreshold();
+}
+```
+
+A user must have collateral and cannot increase a position that is already
+below the liquidation health-factor threshold.
+
+# 4. Calculate the Origination Fee and Required Collateral
+
+```solidity
+vars.borrowFee =
+    i_feeProvider.calculateLoanOriginationFee(msg.sender, _amount);
+
+if (vars.borrowFee == 0) {
+    revert LendingPool__TooSmallAmountToBorrow();
+}
+```
+
+The fee provider calculates a loan-origination fee in units of the borrowed
+asset. A zero fee means the requested amount is too small after integer
+rounding, so the transaction reverts rather than creating a fee-free dust loan.
+
+The data provider then converts the new debt and fee to ETH and calculates the
+collateral required at the user's current weighted LTV:
+
+```solidity
+vars.amountOfCollateralNeededETH =
+    i_dataProvider.calculateCollateralNeededInETH(
+        _reserve,
+        _amount,
+        vars.borrowFee,
+        vars.userBorrowBalanceETH,
+        vars.userTotalFeesETH,
+        vars.currentLtv
+    );
+```
+
+Conceptually, the check is:
 
 ```text
-borrowing
-repaying
-interest-rate switching
-collateral configuration
-liquidations
-flash loans
+required collateral =
+    (existing debt + existing fees + new borrow + new fee) / LTV
 ```
+
+All values in the calculation are converted to ETH first. The borrow is only
+accepted when the user's current collateral covers that requirement.
+
+```solidity
+if (vars.amountOfCollateralNeededETH > vars.userCollateralBalanceETH) {
+    revert LendingPool__InsufficientCollateralToCoverNewBorrow();
+}
+```
+
+# 5. Apply Stable-Rate Restrictions
+
+Stable-rate borrowing has additional constraints:
+
+```solidity
+if (vars.rateMode == CoreLibrary.InterestRateMode.STABLE) {
+    if (!i_core.isUserAllowedToBorrowAtStable(
+        _reserve,
+        msg.sender,
+        _amount
+    )) {
+        revert LendingPool__UserCannotBorrowAmountAtStableRate();
+    }
+
+    uint256 maxLoanPercent =
+        i_parametersProvider.getMaxStableRateBorrowSizePercent();
+    uint256 maxLoanSizeStable =
+        vars.availableLiquidity * maxLoanPercent / 100;
+
+    if (_amount > maxLoanSizeStable) {
+        revert LendingPool__UserIsBorrowingTooMuchLiquidityAtStableRate();
+    }
+}
+```
+
+The core verifies that stable borrowing is enabled for the reserve and prevents
+the user from taking a stable-rate loan against a mostly same-asset collateral
+position. It also limits one stable-rate loan to a configurable percentage of
+currently available reserve liquidity.
+
+For example, with `1,000 DAI` available and a maximum stable-borrow size of
+`25%`, a stable-rate request above `250 DAI` reverts. Variable-rate borrowing
+does not run these extra stable-rate checks.
+
+# 6. Record the Borrow in `LendingPoolCore`
+
+```solidity
+(vars.finalUserBorrowRate, vars.borrowBalanceIncrease) =
+    i_core.updateStateOnBorrow(
+        _reserve,
+        msg.sender,
+        _amount,
+        vars.borrowFee,
+        vars.rateMode
+    );
+```
+
+After every validation succeeds, `LendingPoolCore` updates the reserve and
+borrower state. This includes materializing interest accrued since the user's
+previous debt update, recording the new principal and origination fee, updating
+the reserve's borrow accounting, and recalculating reserve interest rates after
+the liquidity leaves.
+
+The call returns the user's final borrow rate and `borrowBalanceIncrease`, the
+interest that accrued on prior debt before this borrow. For a first borrow, the
+balance increase is `0`.
+
+# 7. Transfer the Borrowed Asset and Emit `Borrow`
+
+```solidity
+i_core.transferToUser(
+    _reserve,
+    payable(msg.sender),
+    _amount
+);
+```
+
+`LendingPoolCore` transfers the requested underlying ERC20 token or native ETH
+to the borrower. Finally, the pool emits the `Borrow` event with the selected
+rate mode, final rate, origination fee, prior-interest increase, referral code,
+and timestamp.
+
+# Borrow Order
+
+```text
+validate reserve, rate mode, liquidity, and collateral
+        ↓
+apply stable-rate-only restrictions when requested
+        ↓
+LendingPoolCore records debt and updates reserve rates
+        ↓
+LendingPoolCore transfers the borrowed underlying asset
+        ↓
+emit Borrow
+```
+
+If any validation, accounting update, or transfer fails, the complete borrow
+transaction reverts, including the core state changes.

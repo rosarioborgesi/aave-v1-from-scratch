@@ -2,37 +2,6 @@
 
 `AToken` is the interest-bearing ERC20 token used by Aave V1 to represent a user's deposit in a reserve.
 
-When a user deposits an asset:
-
-```text
-user deposits the underlying asset
-        ↓
-LendingPoolCore holds the asset
-        ↓
-AToken mints an equivalent amount of aTokens
-```
-
-For example:
-
-```text
-deposit 100 DAI
-receive 100 aDAI
-```
-
-The aToken balance increases over time as the reserve earns interest.
-
-A useful mental model is:
-
-```text
-LendingPool
-    = coordinates the deposit
-
-LendingPoolCore
-    = stores the reserve state and normalized income
-
-AToken
-    = represents the user's deposit and accrued interest
-```
 
 # Main Responsibilities
 
@@ -48,7 +17,6 @@ The current implementation of `AToken` has eight main responsibilities:
 7. Prevent redemptions that would make a borrowing position unsafe.
 8. Clear user accounting data after a full redemption when possible.
 ```
-
 
 ## Underlying Asset
 
@@ -2597,46 +2565,3 @@ current balance = 105
 ```
 
 The user's economic value does not change. The function only converts already accrued virtual interest into stored principal.
-
-# Summary
-
-`AToken` represents a user's supplied position in Aave V1.
-
-Its main accounting formula is:
-
-```text
-current balance =
-    stored principal
-    × current reserve normalized income
-    ÷ user index
-```
-
-The deposit update sequence is:
-
-```text
-calculate accrued interest
-        ↓
-mint accrued interest
-        ↓
-update the user index
-        ↓
-perform the new deposit operation
-```
-
-The redemption sequence is:
-
-```text
-materialize accrued interest
-        ↓
-validate the collateral decrease
-        ↓
-update interest-redirection accounting
-        ↓
-burn the redeemed aTokens
-        ↓
-reset empty user data when possible
-        ↓
-ask LendingPool to return the underlying asset
-```
-
-This design allows balances to grow continuously while only updating storage when a state-changing operation occurs.
