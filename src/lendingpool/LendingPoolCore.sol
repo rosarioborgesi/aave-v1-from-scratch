@@ -497,10 +497,11 @@ contract LendingPoolCore {
     }
 
     /**
-    * @notice allows the configurator to update the reserve decimals
-    * @param _reserve the address of the reserve
-    * @param _decimals the decimals of the reserve
-    **/
+     * @notice allows the configurator to update the reserve decimals
+     * @param _reserve the address of the reserve
+     * @param _decimals the decimals of the reserve
+     *
+     */
     function setReserveDecimals(address _reserve, uint256 _decimals) external onlyLendingPoolConfigurator {
         CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
         reserve.decimals = _decimals;

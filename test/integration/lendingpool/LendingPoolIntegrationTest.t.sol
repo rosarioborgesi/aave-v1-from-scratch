@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, console} from "forge-std/Test.sol";
 
 import {MockERC20} from "../../mocks/MockERC20.sol";
 import {MockFeeProvider} from "../../mocks/MockFeeProvider.sol";
@@ -37,10 +37,6 @@ contract LendingPoolCoreHarness is LendingPoolCore {
         s_reserves[reserve].totalBorrowsVariable = variableBorrows;
     }
 
-    function setReserveBorrowingEnabled(address reserve, bool borrowingEnabled) external {
-        s_reserves[reserve].borrowingEnabled = borrowingEnabled;
-    }
-
     function setReserveConfiguration(
         address reserve,
         uint256 baseLtv,
@@ -54,8 +50,7 @@ contract LendingPoolCoreHarness is LendingPoolCore {
 }
 
 contract LendingPoolIntegrationTest is Test {
-    uint256 public constant DEPOSIT_AMOUNT = 100 ether;
-    uint16 public constant REFERRAL_CODE = 0;
+    using WadRayMath for uint256;
 
     address public user = makeAddr("user");
     address public secondUser = makeAddr("secondUser");
@@ -108,13 +103,14 @@ contract LendingPoolIntegrationTest is Test {
         vm.stopPrank();
 
         core.setReserveConfiguration(address(dai), 75, 80, true);
-        core.setReserveBorrowingEnabled(address(weth), true);
+        vm.prank(configurator);
+        core.enableBorrowingOnReserve(address(weth), true);
 
         // 1 ETH = 2,000 DAI, so 1 DAI = 0.0005 ETH.
         priceOracle.setAssetPrice(address(dai), 0.0005 ether);
         priceOracle.setAssetPrice(address(weth), 1 ether);
 
-        dai.mint(user, DEPOSIT_AMOUNT);
+        dai.mint(user, 100 ether);
     }
 
     /////////////////////////////////////
@@ -127,7 +123,7 @@ contract LendingPoolIntegrationTest is Test {
     //
     // The user starts with 100 DAI and the reserve starts empty:
     //
-    // user DAI = DEPOSIT_AMOUNT = 100 ether = 100e18
+    // user DAI = 100 ether = 100e18
     // core DAI = 0
     // user aDAI = 0
     //
@@ -160,37 +156,46 @@ contract LendingPoolIntegrationTest is Test {
     // Since this is the first deposit, the reserve is also enabled as
     // collateral for the user.
     function testDepositTransfersUnderlyingToCoreAndMintsATokens() external {
-        vm.startPrank(user);
-        dai.approve(address(core), DEPOSIT_AMOUNT);
+        uint256 depositAmount = 100 ether;
+        uint16 referralCode = 0;
 
-        pool.deposit(address(dai), DEPOSIT_AMOUNT, REFERRAL_CODE);
+        vm.startPrank(user);
+        dai.approve(address(core), depositAmount);
+
+        pool.deposit(address(dai), depositAmount, referralCode);
         vm.stopPrank();
 
         assertEq(dai.balanceOf(user), 0);
-        assertEq(dai.balanceOf(address(core)), DEPOSIT_AMOUNT);
-        assertEq(aDai.balanceOf(user), DEPOSIT_AMOUNT);
+        assertEq(dai.balanceOf(address(core)), depositAmount);
+        assertEq(aDai.balanceOf(user), depositAmount);
         assertEq(aDai.getUserIndex(user), WadRayMath.ray());
-        assertEq(core.getReserveAvailableLiquidity(address(dai)), DEPOSIT_AMOUNT);
+        assertEq(core.getReserveAvailableLiquidity(address(dai)), depositAmount);
         (,,, bool useAsCollateral) = core.getUserBasicReserveData(address(dai), user);
         assertTrue(useAsCollateral);
     }
 
     function testDepositRevertsIfReserveIsInactive() external {
+        uint256 depositAmount = 100 ether;
+        uint16 referralCode = 0;
+
         core.setReserveActive(address(dai), false);
 
         vm.prank(user);
         vm.expectRevert(LendingPool.LendingPool__ReserveIsNotActive.selector);
 
-        pool.deposit(address(dai), DEPOSIT_AMOUNT, REFERRAL_CODE);
+        pool.deposit(address(dai), depositAmount, referralCode);
     }
 
     function testDepositRevertsIfReserveIsFrozen() external {
+        uint256 depositAmount = 100 ether;
+        uint16 referralCode = 0;
+
         core.setReserveFreeze(address(dai), true);
 
         vm.prank(user);
         vm.expectRevert(LendingPool.LendingPool__ReserveIsFrozen.selector);
 
-        pool.deposit(address(dai), DEPOSIT_AMOUNT, REFERRAL_CODE);
+        pool.deposit(address(dai), depositAmount, referralCode);
     }
 
     // This test checks that a second deposit is added to the user's existing
@@ -239,15 +244,16 @@ contract LendingPoolIntegrationTest is Test {
         uint256 firstDepositAmount = 100 ether;
         uint256 secondDepositAmount = 50 ether;
         uint256 totalDepositAmount = firstDepositAmount + secondDepositAmount;
+        uint16 referralCode = 0;
 
         dai.mint(user, secondDepositAmount);
 
         vm.startPrank(user);
         dai.approve(address(core), totalDepositAmount);
 
-        pool.deposit(address(dai), firstDepositAmount, REFERRAL_CODE);
+        pool.deposit(address(dai), firstDepositAmount, referralCode);
 
-        pool.deposit(address(dai), secondDepositAmount, REFERRAL_CODE);
+        pool.deposit(address(dai), secondDepositAmount, referralCode);
         vm.stopPrank();
 
         assertEq(dai.balanceOf(user), 0);
@@ -327,15 +333,17 @@ contract LendingPoolIntegrationTest is Test {
     // The 5e18 interest is accounting growth represented by aTokens. It is
     // not an additional DAI transfer from the user.
     function testSecondDepositAfterAccruedInterestMaterializesOldInterestBeforeMinting() external {
+        uint256 firstDepositAmount = 100 ether;
         uint256 secondDepositAmount = 20 ether;
         uint256 liquidityRate = 5e25; // 5%
+        uint16 referralCode = 0;
 
         interestRateStrategy.setRates(liquidityRate, 0, 0);
         dai.mint(user, secondDepositAmount);
 
         vm.startPrank(user);
-        dai.approve(address(core), DEPOSIT_AMOUNT + secondDepositAmount);
-        pool.deposit(address(dai), DEPOSIT_AMOUNT, REFERRAL_CODE);
+        dai.approve(address(core), firstDepositAmount + secondDepositAmount);
+        pool.deposit(address(dai), firstDepositAmount, referralCode);
         vm.stopPrank();
 
         // We are simulating a borrow so that CoreLibrary.updateCumulativeIndexes can update its stored cumulative indexes
@@ -344,7 +352,7 @@ contract LendingPoolIntegrationTest is Test {
         vm.warp(block.timestamp + 365 days);
 
         vm.prank(user);
-        pool.deposit(address(dai), secondDepositAmount, REFERRAL_CODE);
+        pool.deposit(address(dai), secondDepositAmount, referralCode);
 
         // first deposit = 100 DAI
         // normalized income = 1.05 ray
@@ -397,13 +405,16 @@ contract LendingPoolIntegrationTest is Test {
     // LendingPoolCore should reject the operation because an ERC20 transfer
     // and a native ETH transfer cannot be performed in the same deposit.
     function testErc20DepositRevertsIfEthIsSent() external {
+        uint256 depositAmount = 100 ether;
+        uint16 referralCode = 0;
+
         vm.deal(user, 1 ether);
 
         vm.startPrank(user);
-        dai.approve(address(core), DEPOSIT_AMOUNT);
+        dai.approve(address(core), depositAmount);
 
         vm.expectRevert(LendingPoolCore.LendingPoolCore__CantSendEthAndTransferErc20.selector);
-        pool.deposit{value: 1 ether}(address(dai), DEPOSIT_AMOUNT, REFERRAL_CODE);
+        pool.deposit{value: 1 ether}(address(dai), depositAmount, referralCode);
         vm.stopPrank();
     }
 
@@ -421,7 +432,9 @@ contract LendingPoolIntegrationTest is Test {
     //
     // 100e18 < 101e18
     function testDepositRevertsIfUserBalanceIsInsufficient() external {
-        uint256 amountGreaterThanBalance = DEPOSIT_AMOUNT + 1 ether;
+        uint256 depositAmount = 100 ether;
+        uint256 amountGreaterThanBalance = depositAmount + 1 ether;
+        uint16 referralCode = 0;
 
         vm.prank(user);
         dai.approve(address(core), amountGreaterThanBalance);
@@ -429,7 +442,7 @@ contract LendingPoolIntegrationTest is Test {
         vm.prank(user);
         vm.expectRevert();
 
-        pool.deposit(address(dai), amountGreaterThanBalance, REFERRAL_CODE);
+        pool.deposit(address(dai), amountGreaterThanBalance, referralCode);
     }
 
     // This test checks that deposits from different users are accounted for
@@ -468,19 +481,21 @@ contract LendingPoolIntegrationTest is Test {
     //
     // Both users independently enable the reserve as collateral.
     function testTwoDifferentUsersDeposit() external {
+        uint256 userDepositAmount = 100 ether;
         uint256 secondUserDepositAmount = 50 ether;
-        uint256 totalDepositAmount = DEPOSIT_AMOUNT + secondUserDepositAmount;
+        uint256 totalDepositAmount = userDepositAmount + secondUserDepositAmount;
+        uint16 referralCode = 0;
 
         dai.mint(secondUser, secondUserDepositAmount);
 
         vm.startPrank(user);
-        dai.approve(address(core), DEPOSIT_AMOUNT);
-        pool.deposit(address(dai), DEPOSIT_AMOUNT, REFERRAL_CODE);
+        dai.approve(address(core), userDepositAmount);
+        pool.deposit(address(dai), userDepositAmount, referralCode);
         vm.stopPrank();
 
         vm.startPrank(secondUser);
         dai.approve(address(core), secondUserDepositAmount);
-        pool.deposit(address(dai), secondUserDepositAmount, REFERRAL_CODE);
+        pool.deposit(address(dai), secondUserDepositAmount, referralCode);
         vm.stopPrank();
 
         // Reserve liquidity aggregates both deposits:
@@ -491,7 +506,7 @@ contract LendingPoolIntegrationTest is Test {
         assertEq(core.getReserveAvailableLiquidity(address(dai)), totalDepositAmount);
 
         // Each user owns only the aTokens minted for their own deposit.
-        assertEq(aDai.balanceOf(user), DEPOSIT_AMOUNT);
+        assertEq(aDai.balanceOf(user), userDepositAmount);
         assertEq(aDai.balanceOf(secondUser), secondUserDepositAmount);
 
         // Both users entered at the same 1.00 ray normalized income.
@@ -515,10 +530,12 @@ contract LendingPoolIntegrationTest is Test {
     // - aTokens are minted
     // - DAI is transferred
     function testDepositRevertsIfAmountIsZero() external {
+        uint16 referralCode = 0;
+
         vm.prank(user);
         vm.expectRevert(LendingPool.LendingPool__AmountIsZero.selector);
 
-        pool.deposit(address(dai), 0, REFERRAL_CODE);
+        pool.deposit(address(dai), 0, referralCode);
     }
 
     // This test checks the missing-approval case.
@@ -541,10 +558,13 @@ contract LendingPoolIntegrationTest is Test {
     //
     // 0 < 100e18
     function testDepositRevertsIfUserDidNotApproveCore() external {
+        uint256 depositAmount = 100 ether;
+        uint16 referralCode = 0;
+
         vm.prank(user);
         vm.expectRevert();
 
-        pool.deposit(address(dai), DEPOSIT_AMOUNT, REFERRAL_CODE);
+        pool.deposit(address(dai), depositAmount, referralCode);
     }
 
     /////////////////////////////////////
@@ -559,23 +579,25 @@ contract LendingPoolIntegrationTest is Test {
     // 0.02 WETH borrow plus its 0.25% origination fee remains safely
     // collateralized.
     function testUserCanBorrowAtVariableRateUsingDepositedCollateral() external {
+        uint256 depositAmount = 100 ether;
         uint256 wethLiquidity = 1 ether;
         uint256 borrowAmount = 0.02 ether;
         uint256 expectedBorrowFee = 0.00005 ether;
+        uint16 referralCode = 0;
 
         vm.startPrank(user);
-        dai.approve(address(core), DEPOSIT_AMOUNT);
-        pool.deposit(address(dai), DEPOSIT_AMOUNT, REFERRAL_CODE);
+        dai.approve(address(core), depositAmount);
+        pool.deposit(address(dai), depositAmount, referralCode);
         vm.stopPrank();
 
         weth.mint(secondUser, wethLiquidity);
         vm.startPrank(secondUser);
         weth.approve(address(core), wethLiquidity);
-        pool.deposit(address(weth), wethLiquidity, REFERRAL_CODE);
+        pool.deposit(address(weth), wethLiquidity, referralCode);
         vm.stopPrank();
 
         vm.prank(user);
-        pool.borrow(address(weth), borrowAmount, uint256(CoreLibrary.InterestRateMode.VARIABLE), REFERRAL_CODE);
+        pool.borrow(address(weth), borrowAmount, uint256(CoreLibrary.InterestRateMode.VARIABLE), referralCode);
 
         // The borrowed WETH is transferred from the core to Alice.
         assertEq(weth.balanceOf(user), borrowAmount);
@@ -591,7 +613,7 @@ contract LendingPoolIntegrationTest is Test {
         );
 
         // Her DAI remains deposited and continues to be used as collateral.
-        assertEq(aDai.balanceOf(user), DEPOSIT_AMOUNT);
+        assertEq(aDai.balanceOf(user), depositAmount);
         (,,, bool usesDaiAsCollateral) = core.getUserBasicReserveData(address(dai), user);
         assertTrue(usesDaiAsCollateral);
 
@@ -602,5 +624,333 @@ contract LendingPoolIntegrationTest is Test {
         // The borrowed WETH leaves the reserve, reducing available liquidity.
         assertEq(core.getReserveAvailableLiquidity(address(weth)), wethLiquidity - borrowAmount);
         assertEq(weth.balanceOf(address(core)), wethLiquidity - borrowAmount);
+    }
+
+    // Alice deposits DAI as collateral and borrows WETH at the reserve's
+    // configured stable rate. Bob supplies the WETH liquidity.
+    function testUserCanBorrowAtStableRateUsingDepositedCollateral() external {
+        uint256 depositAmount = 100 ether;
+        uint256 wethLiquidity = 1 ether;
+        uint256 borrowAmount = 0.02 ether;
+        uint256 stableBorrowRate = 0.05e27;
+        uint256 expectedBorrowFee = 0.00005 ether;
+        uint16 referralCode = 0;
+
+        interestRateStrategy.setRates(0, stableBorrowRate, 0);
+
+        vm.startPrank(user);
+        dai.approve(address(core), depositAmount);
+        pool.deposit(address(dai), depositAmount, referralCode);
+        vm.stopPrank();
+
+        weth.mint(secondUser, wethLiquidity);
+        vm.startPrank(secondUser);
+        weth.approve(address(core), wethLiquidity);
+        pool.deposit(address(weth), wethLiquidity, referralCode);
+        vm.stopPrank();
+
+        vm.prank(user);
+        pool.borrow(address(weth), borrowAmount, uint256(CoreLibrary.InterestRateMode.STABLE), referralCode);
+
+        (uint256 principalBorrowBalance, uint256 compoundedBorrowBalance,) =
+            core.getUserBorrowBalances(address(weth), user);
+        assertEq(weth.balanceOf(user), borrowAmount);
+        assertEq(principalBorrowBalance, borrowAmount);
+        assertEq(compoundedBorrowBalance, borrowAmount);
+        assertEq(
+            uint256(core.getUserCurrentBorrowRateMode(address(weth), user)),
+            uint256(CoreLibrary.InterestRateMode.STABLE)
+        );
+        assertEq(core.getReserveTotalBorrowsStable(address(weth)), borrowAmount);
+        assertEq(core.getReserveTotalBorrowsVariable(address(weth)), 0);
+        assertEq(core.getReserveCurrentAverageStableBorrowRate(address(weth)), stableBorrowRate);
+
+        (,, uint256 originationFee,) = core.getUserBasicReserveData(address(weth), user);
+        assertEq(originationFee, expectedBorrowFee);
+        assertEq(core.getReserveAvailableLiquidity(address(weth)), wethLiquidity - borrowAmount);
+        assertEq(weth.balanceOf(address(core)), wethLiquidity - borrowAmount);
+    }
+
+    // The user redeems the maximum collateral possible that keeps health factor > 1
+    function testBorrowerCanRedeemMaximumCollateralThatKeepsHealthFactorAboveOne() external {
+        uint256 depositAmount = 100 ether;
+        uint16 referralCode = 0;
+
+        uint256 wethLiquidity = 1 ether;
+        uint256 borrowAmount = 0.02 ether;
+
+        vm.startPrank(user);
+        dai.approve(address(core), depositAmount);
+        pool.deposit(address(dai), depositAmount, referralCode);
+        vm.stopPrank();
+
+        weth.mint(secondUser, wethLiquidity);
+        vm.startPrank(secondUser);
+        weth.approve(address(core), wethLiquidity);
+        pool.deposit(address(weth), wethLiquidity, referralCode);
+        vm.stopPrank();
+
+        vm.prank(user);
+        pool.borrow(address(weth), borrowAmount, uint256(CoreLibrary.InterestRateMode.VARIABLE), referralCode);
+
+        // borrowed WETH            = 0.02 ETH
+        // origination fee (0.25%)  = 0.00005 ETH
+        // total debt               = 0.02005 ETH
+        // liquidation threshold    = 80%
+        // minimum collateral       = 0.02005 / 0.80 = 0.0250625 ETH    
+        // 
+        // since 1 ETH = 2,000 DAI -> 1 DAI = 0.0005 ETH
+        // minimum collateral       = 0.0250625 / 0.0005 = 50,125 DAI
+        //
+        // Alice deposited 100 DAI
+        // maximum amount to redeem = 100 DAI - 50,125 DAI = 49,875
+        //
+        // -4,000 (DAI wei) is a tiny rounding safety buffer
+
+        uint256 maximumSafeRedeemAmount = 49.875 ether - 4_000;
+
+        assertTrue(aDai.isTransferAllowed(user, maximumSafeRedeemAmount));
+
+        vm.prank(user);
+        aDai.redeem(maximumSafeRedeemAmount);
+
+        (,,,,,, uint256 healthFactor,) = dataProvider.calculateUserGlobalData(user);
+        assertGt(healthFactor, WadRayMath.wad()); // healthFactor = 1000000000000000050 > 1e18
+        assertEq(aDai.balanceOf(user), depositAmount - maximumSafeRedeemAmount);
+    }
+
+    // The user is trying to redeem a little bit more of the maximum collateral redeemable so health factor goes < 1
+    function testBorrowerCannotRedeemCollateralThatMakesHealthFactorAtMostOne() external {
+        uint256 depositAmount = 100 ether;
+        uint16 referralCode = 0;
+
+        uint256 wethLiquidity = 1 ether;
+        uint256 borrowAmount = 0.02 ether;
+
+        vm.startPrank(user);
+        dai.approve(address(core), depositAmount);
+        pool.deposit(address(dai), depositAmount, referralCode);
+        vm.stopPrank();
+
+        weth.mint(secondUser, wethLiquidity);
+        vm.startPrank(secondUser);
+        weth.approve(address(core), wethLiquidity);
+        pool.deposit(address(weth), wethLiquidity, referralCode);
+        vm.stopPrank();
+
+        vm.prank(user);
+        pool.borrow(address(weth), borrowAmount, uint256(CoreLibrary.InterestRateMode.VARIABLE), referralCode);
+
+        // This leaves collateral at the health-factor boundary after rounding.
+        // The maximum amout that can be redeemed is 49.875 ether - 4_000, so health factor goes < 1
+        uint256 unsafeRedeemAmount = 49.875 ether - 2_000;
+
+        vm.prank(user);
+        vm.expectRevert(AToken.AToken__TransferNotAllowed.selector);
+        aDai.redeem(unsafeRedeemAmount);
+    }
+
+    function testBorrowerCannotRedeemAllCollateralWhileDebtIsOutstanding() external {
+        uint256 depositAmount = 100 ether;
+        uint16 referralCode = 0;
+
+        uint256 wethLiquidity = 1 ether;
+        uint256 borrowAmount = 0.02 ether;
+
+        vm.startPrank(user);
+        dai.approve(address(core), depositAmount);
+        pool.deposit(address(dai), depositAmount, referralCode);
+        vm.stopPrank();
+
+        weth.mint(secondUser, wethLiquidity);
+        vm.startPrank(secondUser);
+        weth.approve(address(core), wethLiquidity);
+        pool.deposit(address(weth), wethLiquidity, referralCode);
+        vm.stopPrank();
+
+        vm.prank(user);
+        pool.borrow(address(weth), borrowAmount, uint256(CoreLibrary.InterestRateMode.VARIABLE), referralCode);
+
+        vm.prank(user);
+        vm.expectRevert(AToken.AToken__TransferNotAllowed.selector);
+        aDai.redeem(type(uint256).max);
+    }
+
+    // A second variable-rate borrow checkpoints interest accrued since the first
+    // borrow, adds that interest to the user's stored debt, and advances the
+    // reserve variable-borrow index before adding the new loan.
+    function testUserCanBorrowAgainAfterTimePassesAndAccruesVariableDebt() external {
+        uint256 depositAmount = 100 ether;
+        uint256 wethLiquidity = 1 ether;
+        uint256 firstBorrowAmount = 0.02 ether;
+        uint256 secondBorrowAmount = 0.005 ether;
+        uint256 variableBorrowRate = 0.10e27;
+        uint16 referralCode = 0;
+
+        // The mock strategy supplies a 10% annual variable rate. This rate is
+        // stored on the WETH reserve by the first borrow and applies for the
+        // full year before the second one.
+        interestRateStrategy.setRates(0, 0, variableBorrowRate);
+
+        vm.startPrank(user);
+        dai.approve(address(core), depositAmount);
+        pool.deposit(address(dai), depositAmount, referralCode);
+        vm.stopPrank();
+
+        weth.mint(secondUser, wethLiquidity);
+        vm.startPrank(secondUser);
+        weth.approve(address(core), wethLiquidity);
+        pool.deposit(address(weth), wethLiquidity, referralCode);
+        vm.stopPrank();
+
+        vm.prank(user);
+        pool.borrow(address(weth), firstBorrowAmount, uint256(CoreLibrary.InterestRateMode.VARIABLE), referralCode);
+
+        vm.warp(block.timestamp + 365 days);
+
+        {
+            // This is the same compounded index calculation used by the reserve
+            // when it checkpoints the elapsed year during the second borrow.
+
+            // expectedVariableBorrowIndex = 1 × (1 + annualInterestRate / secondsInOneYear) ^ secondsInOneYear
+            // expectedVariableBorrowIndex = 1 × (1 + 0.10 / 31,536,000) ^ 31,536,000 ≈ 1.1051709
+
+            // Remeber the compound-interest formula
+            // A = P x (1 + r / n) ^ n
+            //
+            // where:
+            // - P = starting value, initial borrow index = 1
+            // - r = annual rate, 0.10 (10%)
+            // - n = number of compounding periods in one year, here 365 days = 31,536,00 seconds  
+            uint256 expectedVariableBorrowIndex =
+                WadRayMath.ray().rayMul((WadRayMath.ray() + variableBorrowRate / 365 days).rayPow(365 days)); //≈ 1.1051709e27
+            uint256 expectedAccruedDebt = firstBorrowAmount.rayMul(expectedVariableBorrowIndex); // = 0.02 × 1.1051709 ≈ 0.022103418 WETH
+            uint256 expectedBorrowBalanceIncrease = expectedAccruedDebt - firstBorrowAmount; // = 0.022103418 - 0.02 ≈ 0.002103418 WETH
+            uint256 expectedPrincipalBorrowBalance = expectedAccruedDebt + secondBorrowAmount;
+
+            // The Borrow event exposes the interest materialized by this repeated
+            // borrow as borrowBalanceIncrease.
+            vm.expectEmit(true, true, true, true, address(pool));
+            emit LendingPool.Borrow(
+                address(weth),
+                user,
+                secondBorrowAmount,
+                uint256(CoreLibrary.InterestRateMode.VARIABLE),
+                variableBorrowRate,
+                0.0000125 ether, // origination fee
+                expectedBorrowBalanceIncrease,
+                referralCode,
+                block.timestamp
+            );
+
+            vm.prank(user);
+            pool.borrow(address(weth), secondBorrowAmount, uint256(CoreLibrary.InterestRateMode.VARIABLE), referralCode);
+
+            // The reserve index and the user's debt are checkpointed at the second
+            // borrow. The new principal contains accrued interest plus both loans.
+            (uint256 principalBorrowBalance, uint256 compoundedBorrowBalance, uint256 borrowBalanceIncrease) =
+                core.getUserBorrowBalances(address(weth), user);
+            assertEq(core.getReserveVariableBorrowsCumulativeIndex(address(weth)), expectedVariableBorrowIndex);
+            assertEq(principalBorrowBalance, expectedPrincipalBorrowBalance);
+            assertEq(compoundedBorrowBalance, expectedPrincipalBorrowBalance);
+
+            // No time has passed since the second borrow, so its interest has not yet accrued.
+            assertEq(borrowBalanceIncrease, 0); 
+
+            // Variable borrow totals include the materialized interest and the
+            // second loan; no stable-rate debt was created.
+            assertEq(core.getReserveTotalBorrowsStable(address(weth)), 0);
+            assertEq(core.getReserveTotalBorrowsVariable(address(weth)), expectedPrincipalBorrowBalance);
+
+            // The reserve stores the current variable borrow rate returned by the interest-rate strategy.
+            assertEq(core.getReserveCurrentVariableBorrowRate(address(weth)), variableBorrowRate);
+            assertEq(weth.balanceOf(user), firstBorrowAmount + secondBorrowAmount);
+        }
+
+        // The global account data values debt at the WETH price (1 ETH per
+        // WETH), includes both origination fees, and retains the DAI collateral.
+        (
+            uint256 totalLiquidityBalanceETH,
+            uint256 totalCollateralBalanceETH,
+            uint256 totalBorrowBalanceETH,
+            uint256 totalFeesETH,
+            uint256 currentLtv,
+            uint256 currentLiquidationThreshold,
+            uint256 healthFactor,
+
+        ) = dataProvider.calculateUserGlobalData(user);
+        uint256 expectedHealthFactor =
+            (0.05 ether * currentLiquidationThreshold / 100).wadDiv(totalBorrowBalanceETH + 0.0000625 ether);
+
+        assertEq(totalLiquidityBalanceETH, 0.05 ether);
+        assertEq(totalCollateralBalanceETH, 0.05 ether);
+        assertEq(totalBorrowBalanceETH, core.getReserveTotalBorrowsVariable(address(weth)));
+        assertEq(totalFeesETH, 0.0000625 ether);
+        assertEq(currentLtv, 75);
+        assertEq(currentLiquidationThreshold, 80);
+        assertEq(healthFactor, expectedHealthFactor);
+    }
+
+    // A fall in the collateral's oracle price can make an otherwise valid
+    // borrow unhealthy. Once that happens, the borrower cannot withdraw any
+    // collateral because doing so would worsen an already unsafe position.
+    function testOraclePriceShockReportsUnhealthyPositionAndBlocksCollateralWithdrawal() external {
+        uint256 depositAmount = 100 ether;
+        uint256 wethLiquidity = 1 ether;
+        uint256 borrowAmount = 0.02 ether;
+        uint256 borrowFee = 0.00005 ether;
+        uint256 shockedDaiPrice = 0.00025 ether;
+        uint16 referralCode = 0;
+
+        vm.startPrank(user);
+        dai.approve(address(core), depositAmount);
+        pool.deposit(address(dai), depositAmount, referralCode);
+        vm.stopPrank();
+
+        weth.mint(secondUser, wethLiquidity);
+        vm.startPrank(secondUser);
+        weth.approve(address(core), wethLiquidity);
+        pool.deposit(address(weth), wethLiquidity, referralCode);
+        vm.stopPrank();
+
+        vm.prank(user);
+        pool.borrow(address(weth), borrowAmount, uint256(CoreLibrary.InterestRateMode.VARIABLE), referralCode);
+
+        // DAI loses half of its ETH-denominated value: 100 DAI is now worth
+        // 0.025 ETH rather than 0.05 ETH.
+        priceOracle.setAssetPrice(address(dai), shockedDaiPrice);
+
+        (
+            uint256 totalLiquidityBalanceETH,
+            uint256 totalCollateralBalanceETH,
+            uint256 totalBorrowBalanceETH,
+            uint256 totalFeesETH,
+            ,
+            uint256 currentLiquidationThreshold,
+            uint256 healthFactor,
+            bool healthFactorBelowThreshold
+        ) = dataProvider.calculateUserGlobalData(user);
+
+        // expectedCollateralBalanceETH = depositAmount * shockedDaiPrice / 1 ether;
+        // expectedCollateralBalanceETH = 100 DAI * 0.00025 ETH/DAI = 0.025 ETH
+        uint256 expectedCollateralBalanceETH = depositAmount * shockedDaiPrice / 1 ether;
+        
+        // health factor = (collateral value * liquidation threshold) / (borrowed amount + fee) 
+        // health factor = (0.025 * 80/100) / (0.02 + 0.00005) =  0.02 / 0.02005 = 0.997506234413965087
+        uint256 expectedHealthFactor =
+            (expectedCollateralBalanceETH * currentLiquidationThreshold / 100).wadDiv(borrowAmount + borrowFee);
+
+        assertEq(totalLiquidityBalanceETH, expectedCollateralBalanceETH);
+        assertEq(totalCollateralBalanceETH, expectedCollateralBalanceETH);
+        assertEq(totalBorrowBalanceETH, borrowAmount);
+        assertEq(totalFeesETH, borrowFee);
+        assertEq(currentLiquidationThreshold, 80);
+        assertEq(healthFactor, expectedHealthFactor);
+        assertLt(healthFactor, WadRayMath.wad());
+        assertTrue(healthFactorBelowThreshold);
+
+        vm.prank(user);
+        vm.expectRevert(AToken.AToken__TransferNotAllowed.selector);
+        aDai.redeem(1 ether);
     }
 }
