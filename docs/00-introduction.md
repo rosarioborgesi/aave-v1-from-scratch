@@ -14,45 +14,4 @@ In this project, we will start with the simplest possible flow:
 User deposits ERC20 tokens
 User receives aTokens
 ```
-
-## First Milestone
-
-The first milestone is to implement a simple deposit flow:
-
-```text
-DAI deposit -> receive aDAI
-```
-
-For now, we will ignore:
-
-- borrowing
-- repay
-- collateral
-- health factor
-- liquidations
-- flash loans
-- interest accrual
-- stable and variable rates
-
-We will introduce these concepts later, one by one.
-
-## Why Start With Deposit?
-
-Deposit is the simplest action in the protocol.
-
-When a user deposits an underlying asset into Aave, the protocol mints a corresponding amount of aTokens to the user.
-
-Example:
-
-```text
-User deposits 100 DAI
-User receives 100 aDAI
-```
-
-The aToken represents the user's position in the pool.
-
-In the full Aave protocol, aTokens accrue interest over time. In our first version, we will keep the model simple and mint aTokens 1:1 with the deposited amount:
-
-```math
-aTokensMinted = underlyingDeposited
-```
+// TODO complete
