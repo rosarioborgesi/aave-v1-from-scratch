@@ -396,7 +396,7 @@ library CoreLibrary {
         uint256 weightedPreviousTotalBorrows =
             previousTotalBorrowStable.wadToRay().rayMul(_reserve.currentAverageStableBorrowRate);
 
-        // Average rate = total weighted rate contridìbution / total stable debt
+        // Average rate = total weighted rate contribution / total stable debt
         _reserve.currentAverageStableBorrowRate =
             (weightedLastBorrow + weightedPreviousTotalBorrows).rayDiv(_reserve.totalBorrowsStable.wadToRay());
     }
