@@ -54,6 +54,8 @@ contract LendingPoolCore {
     error LendingPoolCore__ReserveHasBorrows();
     error LendingPoolCore__InvalidBorrowRateMode();
     error LendingPoolCore__ReserveNotInitializedYet();
+    error LendingPoolCore__CannotSendEthAlongWithErc20Transfer();
+    error LendingPoolCore__AmountAndValueSentDoNotMatch();
 
     ///////////////////////////////////
     //            Libraries          //
@@ -190,7 +192,7 @@ contract LendingPoolCore {
             if (msg.value > _amount) {
                 // Send back excess ETH
                 uint256 excessAmount = msg.value - _amount;
-                (bool result,) = _user.call{value: excessAmount, gas: 50000}("");
+                (bool result,) = _user.call{value: excessAmount}("");
                 if (!result) {
                     revert LendingPoolCore__EthTransferFailed(_user, excessAmount);
                 }
@@ -296,7 +298,7 @@ contract LendingPoolCore {
         if (_reserve != EthAddressLib.ethAddress()) {
             IERC20(_reserve).safeTransfer(_user, _amount);
         } else {
-            (bool result,) = _user.call{value: _amount, gas: 50000}("");
+            (bool result,) = _user.call{value: _amount}("");
             if (!result) {
                 revert LendingPoolCore__EthTransferFailed(_user, _amount);
             }
@@ -505,6 +507,74 @@ contract LendingPoolCore {
     function setReserveDecimals(address _reserve, uint256 _decimals) external onlyLendingPoolConfigurator {
         CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
         reserve.decimals = _decimals;
+    }
+
+    /**
+     * @dev updates the state of the core as a consequence of a repay action.
+     * @param _reserve the address of the reserve on which the user is repaying
+     * @param _user the address of the borrower
+     * @param _paybackAmountMinusFees the amount being paid back minus fees
+     * @param _originationFeeRepaid the fee on the amount that is being repaid
+     * @param _balanceIncrease the accrued interest on the borrowed amount
+     * @param _repaidWholeLoan true if the user is repaying the whole loan
+     *
+     */
+    function updateStateOnRepay(
+        address _reserve,
+        address _user,
+        uint256 _paybackAmountMinusFees,
+        uint256 _originationFeeRepaid,
+        uint256 _balanceIncrease,
+        bool _repaidWholeLoan
+    ) external onlyLendingPool {
+        // Update reserve-level borrow accounting.
+        // This reduces the reserve's total outstanding debt by the amount repaid
+        // and accounts for interest accrued since the borrower's last update.
+        _updateReserveStateOnRepay(_reserve, _user, _paybackAmountMinusFees, _balanceIncrease);
+
+        // Update the borrower's personal debt position.
+        // This reduces their debt, decreases the outstanding origination fee,
+        // and clears their borrow data if they repaid the whole loan.
+        _updateUserStateOnRepay(
+            _reserve, _user, _paybackAmountMinusFees, _originationFeeRepaid, _balanceIncrease, _repaidWholeLoan
+        );
+
+        // Recalculate interest rates after repayment.
+        // The repaid amount increases available reserve liquidity,
+        // while no new amount is borrowed in this operation.
+        _updateReserveInterestRatesAndTimestamp(_reserve, _paybackAmountMinusFees, 0);
+    }
+
+    /**
+     * @dev transfers the protocol fees to the fees collection address
+     * Any value above `_amount` remains in the core, so callers should pass the exact fee amount.
+     * @param _token the address of the token being transferred
+     * @param _user the address of the user from where the transfer is happening
+     * @param _amount the amount being transferred
+     * @param _destination the fee receiver address
+     *
+     */
+    function transferToFeeCollectionAddress(address _token, address _user, uint256 _amount, address _destination)
+        external
+        payable
+        onlyLendingPool
+    {
+        if (_token != EthAddressLib.ethAddress()) {
+            // ERC20 transfer
+            if (msg.value > 0) {
+                revert LendingPoolCore__CannotSendEthAlongWithErc20Transfer();
+            }
+            IERC20(_token).safeTransferFrom(_user, _destination, _amount);
+        } else {
+            // ETH transfer
+            if (msg.value < _amount) {
+                revert LendingPoolCore__AmountAndValueSentDoNotMatch();
+            }
+            (bool success,) = payable(_destination).call{value: _amount}("");
+            if (!success) {
+                revert LendingPoolCore__EthTransferFailed(_destination, _amount);
+            }
+        }
     }
 
     ////////////////////////////////
@@ -752,6 +822,99 @@ contract LendingPoolCore {
         user.originationFee += _fee;
 
         // Update the timestamp
+        user.lastUpdateTimestamp = uint40(block.timestamp);
+    }
+
+    /**
+     * @dev updates the state of the reserve as a consequence of a repay action.
+     * @param _reserve the address of the reserve on which the user is repaying
+     * @param _user the address of the borrower
+     * @param _paybackAmountMinusFees the amount being paid back minus fees
+     * @param _balanceIncrease the accrued interest on the borrowed amount
+     *
+     */
+    function _updateReserveStateOnRepay(
+        address _reserve,
+        address _user,
+        uint256 _paybackAmountMinusFees,
+        uint256 _balanceIncrease
+    ) internal {
+        // pool total debt after repay
+        //    = old recorded debt
+        //    + interest that accumulated
+        //    - amount repaid toward debt
+
+        // Loads the reserve’s data and this user’s debt data.
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
+
+        // Checks whether the user borrowed at a stable or variable interest rate.
+        CoreLibrary.InterestRateMode borrowRateMode = getUserCurrentBorrowRateMode(_reserve, _user);
+
+        // Updates the reserve’s cumulative interest indexes, bringing the pool accounting up to the current moment.
+        s_reserves[_reserve].updateCumulativeIndexes();
+
+        // Updates total borrowed amounts according to the user's rate mode
+        if (borrowRateMode == CoreLibrary.InterestRateMode.STABLE) {
+            // Stable-rate loan
+            // The accrued interest is added to the pool's total stable debt.
+            reserve.increaseTotalBorrowsStableAndUpdateAverageRate(_balanceIncrease, user.stableBorrowRate);
+
+            // The repaid amount is removed from total stable debt
+            reserve.decreaseTotalBorrowsStableAndUpdateAverageRate(_paybackAmountMinusFees, user.stableBorrowRate);
+
+            // Both operations also recalculate the reserve’s average stable borrowing rate, because the mix of outstanding stable loans has changed.
+        } else {
+            // Variable-rate loan
+            // Add the user's newly accrued interest to total variable debt.
+            reserve.increaseTotalBorrowsVariable(_balanceIncrease);
+            // Subtract the amount repaid from total variable debt.
+            reserve.decreaseTotalBorrowsVariable(_paybackAmountMinusFees);
+        }
+    }
+
+    /**
+     * @dev updates the state of the user as a consequence of a repay action.
+     * @param _reserve the address of the reserve on which the user is repaying
+     * @param _user the address of the borrower
+     * @param _paybackAmountMinusFees the amount being paid back minus fees
+     * @param _originationFeeRepaid the fee on the amount that is being repaid
+     * @param _balanceIncrease the accrued interest on the borrowed amount
+     * @param _repaidWholeLoan true if the user is repaying the whole loan
+     *
+     */
+    function _updateUserStateOnRepay(
+        address _reserve,
+        address _user,
+        uint256 _paybackAmountMinusFees,
+        uint256 _originationFeeRepaid,
+        uint256 _balanceIncrease,
+        bool _repaidWholeLoan
+    ) internal {
+        // Loads the reserve’s data and this user’s debt data.
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
+
+        // Update the user's debt balance:
+        // 1. Start with the debt previously stored (user.principalBorrowBalance)
+        // 2. Add interest accumulated since the last update (_balanceIncrease)
+        // 3. Subtract the part of this transaction that repays the loan (_paybackAmountMinusFees)
+        user.principalBorrowBalance = user.principalBorrowBalance + _balanceIncrease - _paybackAmountMinusFees;
+
+        // Saves the reserve's current variable interest index as the user's new reference point.
+        user.lastVariableBorrowCumulativeIndex = reserve.lastVariableBorrowCumulativeIndex;
+
+        // Checks whether this repayment fully closes the user's loan.
+        if (_repaidWholeLoan) {
+            // If no debt remains, erase the user's stable borrow rate and the variable-borrow index.
+            user.stableBorrowRate = 0;
+            user.lastVariableBorrowCumulativeIndex = 0;
+        }
+
+        // Reduces the user's remaining origination fee by the portion repaid in this transaction.
+        user.originationFee = user.originationFee - _originationFeeRepaid;
+
+        //Records the current block time as the user's last loan-state update
         user.lastUpdateTimestamp = uint40(block.timestamp);
     }
 
