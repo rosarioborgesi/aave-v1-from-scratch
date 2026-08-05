@@ -4,6 +4,7 @@ pragma solidity 0.8.30;
 import {Test} from "forge-std/Test.sol";
 import {Ownable} from "openzeppelin-contracts/access/Ownable.sol";
 
+import {AddressStorage} from "src/configuration/AddressStorage.sol";
 import {LendingPoolAddressesProvider} from "src/configuration/LendingPoolAddressesProvider.sol";
 
 contract LendingPoolAddressesProviderUnitTest is Test {
@@ -56,7 +57,7 @@ contract LendingPoolAddressesProviderUnitTest is Test {
     }
 
     function testSetLendingPoolRevertsWhenAddressIsZero() external {
-        vm.expectRevert(LendingPoolAddressesProvider.LendingPoolAddressesProvider__ZeroAddress.selector);
+        vm.expectRevert(AddressStorage.AddressStorage__ZeroAddress.selector);
 
         vm.prank(owner);
         addressesProvider.setLendingPool(address(0));
@@ -83,7 +84,7 @@ contract LendingPoolAddressesProviderUnitTest is Test {
     }
 
     function testSetLendingPoolCoreRevertsWhenAddressIsZero() external {
-        vm.expectRevert(LendingPoolAddressesProvider.LendingPoolAddressesProvider__ZeroAddress.selector);
+        vm.expectRevert(AddressStorage.AddressStorage__ZeroAddress.selector);
 
         vm.prank(owner);
         addressesProvider.setLendingPoolCore(address(0));
@@ -110,7 +111,7 @@ contract LendingPoolAddressesProviderUnitTest is Test {
     }
 
     function testSetLendingPoolConfiguratorRevertsWhenAddressIsZero() external {
-        vm.expectRevert(LendingPoolAddressesProvider.LendingPoolAddressesProvider__ZeroAddress.selector);
+        vm.expectRevert(AddressStorage.AddressStorage__ZeroAddress.selector);
 
         vm.prank(owner);
         addressesProvider.setLendingPoolConfigurator(address(0));
@@ -137,7 +138,7 @@ contract LendingPoolAddressesProviderUnitTest is Test {
     }
 
     function testSetLendingPoolDataProviderRevertsWhenAddressIsZero() external {
-        vm.expectRevert(LendingPoolAddressesProvider.LendingPoolAddressesProvider__ZeroAddress.selector);
+        vm.expectRevert(AddressStorage.AddressStorage__ZeroAddress.selector);
 
         vm.prank(owner);
         addressesProvider.setLendingPoolDataProvider(address(0));
@@ -164,7 +165,7 @@ contract LendingPoolAddressesProviderUnitTest is Test {
     }
 
     function testSetPriceOracleRevertsWhenAddressIsZero() external {
-        vm.expectRevert(LendingPoolAddressesProvider.LendingPoolAddressesProvider__ZeroAddress.selector);
+        vm.expectRevert(AddressStorage.AddressStorage__ZeroAddress.selector);
 
         vm.prank(owner);
         addressesProvider.setPriceOracle(address(0));
@@ -191,7 +192,7 @@ contract LendingPoolAddressesProviderUnitTest is Test {
     }
 
     function testSetFeeProviderRevertsWhenAddressIsZero() external {
-        vm.expectRevert(LendingPoolAddressesProvider.LendingPoolAddressesProvider__ZeroAddress.selector);
+        vm.expectRevert(AddressStorage.AddressStorage__ZeroAddress.selector);
 
         vm.prank(owner);
         addressesProvider.setFeeProvider(address(0));
