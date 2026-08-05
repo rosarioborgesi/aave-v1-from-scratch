@@ -998,3 +998,420 @@ emit Borrow
 
 If any validation, accounting update, or transfer fails, the complete borrow
 transaction reverts, including the core state changes.
+
+# Complete Borrow Example
+
+Assume Alice has already supplied ETH as collateral. She wants to take a
+variable-rate DAI loan:
+
+```text
+Alice collateral                 = 1 ETH
+weighted LTV                     = 75%
+DAI price                        = 0.0005 ETH
+DAI available in LendingPoolCore = 5,000 DAI
+origination fee                  = 0.25%
+requested borrow                 = 1,000 DAI
+rate mode                        = VARIABLE
+```
+
+Alice calls:
+
+```solidity
+lendingPool.borrow(
+    DAI,
+    1_000 ether,
+    uint256(CoreLibrary.InterestRateMode.VARIABLE),
+    0
+);
+```
+
+The pool first confirms that DAI is active, unfrozen, borrow-enabled, and has
+enough liquidity. It then reads Alice's position. Assume she has no existing
+debt or fees and her health factor is above the liquidation threshold.
+
+The fee provider calculates a `2.5 DAI` origination fee. The collateral check
+includes both the requested loan and this fee:
+
+```text
+new borrow value = 1,000 DAI × 0.0005 ETH/DAI = 0.5 ETH
+new fee value    =   2.5 DAI × 0.0005 ETH/DAI = 0.00125 ETH
+total new debt   = 0.50125 ETH
+
+collateral required = 0.50125 ETH / 75% = 0.66833 ETH
+Alice's collateral  = 1 ETH
+```
+
+Because `1 ETH` covers the required `0.66833 ETH`, the borrow passes. The
+variable-rate mode skips the stable-rate-only checks.
+
+`LendingPoolCore.updateStateOnBorrow()` then records Alice's first DAI debt.
+There is no earlier debt, so `borrowBalanceIncrease` is `0`. The core records
+the `1,000 DAI` principal and the separate `2.5 DAI` origination fee, updates
+the reserve's variable-borrow totals and interest rates, and sends the
+requested DAI to Alice.
+
+The final state is:
+
+```text
+Alice receives                    1,000 DAI
+LendingPoolCore DAI liquidity      5,000 → 4,000 DAI
+Alice DAI principal debt           1,000 DAI
+Alice DAI origination fee            2.5 DAI
+Alice prior-interest increase          0 DAI
+```
+
+Alice receives the full `1,000 DAI`; the fee is not deducted from the amount
+sent to her. She owes that fee separately, alongside the principal and any
+interest that accrues later.
+
+# Repaying Assets
+
+## `repay`
+
+```solidity
+function repay(
+    address _reserve,
+    uint256 _amount,
+    address payable _onBehalfOf
+)
+    external
+    payable
+    nonReentrant
+    onlyActiveReserve(_reserve)
+    onlyAmountGreaterThanZero(_amount)
+```
+
+`repay()` pays down a borrow for `_onBehalfOf`. Usually the caller repays their
+own loan, so `_onBehalfOf` and `msg.sender` are the same address. A different
+caller can also make a repayment on a borrower's behalf.
+
+Repayment has two components:
+
+```text
+total amount owed = compounded debt + outstanding origination fee
+```
+
+The compounded debt includes interest accrued since the borrower's previous
+borrow-related update. The origination fee is paid first; only the amount left
+after the fee reduces the loan principal.
+
+For an ERC20 reserve, the core pulls tokens with `transferFrom()`. For the ETH
+reserve, the caller provides ETH as `msg.value`. The function deliberately
+does not require the reserve to be unfrozen: freezing stops new deposits and
+borrows, but must not prevent borrowers from reducing risk.
+
+The `nonReentrant`, active-reserve, and non-zero-amount modifiers run first.
+The function then performs the following operations.
+
+# 1. Read the Current Debt and Outstanding Fee
+
+```solidity
+(vars.principalBorrowBalance, vars.compoundedBorrowBalance, vars.borrowBalanceIncrease) =
+    i_core.getUserBorrowBalances(_reserve, _onBehalfOf);
+
+vars.originationFee =
+    i_core.getUserOriginationFee(_reserve, _onBehalfOf);
+```
+
+`principalBorrowBalance` is the borrower's stored debt from the last state
+update. `compoundedBorrowBalance` is the debt now, after adding accrued
+interest. Their difference is `borrowBalanceIncrease`:
+
+```text
+borrowBalanceIncrease = compounded debt - stored principal
+```
+
+Example:
+
+```text
+stored principal     = 100 DAI
+accrued interest     =   3 DAI
+compounded debt      = 103 DAI
+outstanding fee      =   1 DAI
+total amount owed    = 104 DAI
+```
+
+The debt calculation is initially a view calculation. It becomes stored state
+only when `updateStateOnRepay()` is called later.
+
+If the borrower has no compounded debt, repayment is rejected:
+
+```solidity
+if (vars.compoundedBorrowBalance == 0) {
+    revert LendingPool__NoBorrowPending();
+}
+```
+
+# 2. Resolve the Asset Type and Repayment Amount
+
+```solidity
+vars.isETH = EthAddressLib.ethAddress() == _reserve;
+```
+
+This selects the transfer path later:
+
+```text
+ERC20 reserve → transferFrom()
+ETH reserve   → msg.value
+```
+
+The special value `type(uint256).max` means “repay everything.” It is available
+only when borrowers repay their own debt:
+
+```solidity
+if (_amount == type(uint256).max && msg.sender != _onBehalfOf) {
+    revert LendingPool__ExplicitAmountRequiredForRepayOnBehalf();
+}
+```
+
+This prevents a third party from using an unbounded instruction against another
+user's position. A third-party repayer must state an exact amount.
+
+The function starts by selecting the entire amount owed, then caps it for an
+explicit partial repayment:
+
+```solidity
+vars.paybackAmount =
+    vars.compoundedBorrowBalance + vars.originationFee;
+
+if (_amount != type(uint256).max && _amount < vars.paybackAmount) {
+    vars.paybackAmount = _amount;
+}
+```
+
+Therefore, specifying more than the total owed does not overpay:
+
+```text
+total owed = 104 DAI
+_amount    = 200 DAI
+paid       = 104 DAI
+```
+
+For ETH, `msg.value` must cover the selected payment:
+
+```solidity
+if (vars.isETH && msg.value < vars.paybackAmount) {
+    revert LendingPool__InvalidETHRepaymentAmount();
+}
+```
+
+Any excess ETH is later refunded by `LendingPoolCore.transferToReserve()`.
+
+# 3. Pay the Origination Fee First
+
+```solidity
+if (vars.paybackAmount <= vars.originationFee) {
+    i_core.updateStateOnRepay(
+        _reserve,
+        _onBehalfOf,
+        0,
+        vars.paybackAmount,
+        vars.borrowBalanceIncrease,
+        false
+    );
+    // transfer the fee and emit Repay, then return
+}
+```
+
+When the selected repayment is no greater than the outstanding fee, it pays
+only the fee. The loan balance does not decrease. The core still materializes
+the accrued interest supplied in `borrowBalanceIncrease`, reduces the stored
+fee, updates reserve accounting, and recalculates interest rates.
+
+Using the earlier example, if Alice pays `0.50 DAI`:
+
+```text
+compounded debt       = 103 DAI
+outstanding fee       =   1 DAI
+payment               = 0.5 DAI
+
+fee remaining         = 0.5 DAI
+debt remaining        = 103 DAI
+debt repaid           = 0 DAI
+```
+
+The paid fee goes to the token distributor, the protocol's fee-collection
+address. In this fee-only ERC20 branch, the implementation calls
+`transferFrom(_onBehalfOf, ...)`, so the borrower must provide the ERC20 funds
+and allowance even if another account initiated the call. This differs from
+the normal repayment branch below, which pulls ERC20 funds from `msg.sender`.
+
+# 4. Update Debt and Reserve Accounting
+
+If the payment exceeds the fee, the fee is fully paid and the remainder reduces
+the debt:
+
+```solidity
+vars.paybackAmountMinusFees =
+    vars.paybackAmount - vars.originationFee;
+
+i_core.updateStateOnRepay(
+    _reserve,
+    _onBehalfOf,
+    vars.paybackAmountMinusFees,
+    vars.originationFee,
+    vars.borrowBalanceIncrease,
+    vars.compoundedBorrowBalance == vars.paybackAmountMinusFees
+);
+```
+
+The final boolean is true only when every unit of compounded debt is repaid.
+In that case, the core clears the borrower's borrow data. A partial repayment
+leaves the remaining debt open.
+
+`updateStateOnRepay()` updates both levels of accounting:
+
+```text
+reserve level: reduce total borrows, include accrued interest, update rates
+user level:    reduce debt, reduce/clear fee, materialize accrued interest
+```
+
+Because repayment adds liquidity back to the reserve, the core recalculates
+the reserve's rates using the new liquidity level before the token transfer is
+made. If a later transfer fails, the transaction reverts, including this state
+update.
+
+# 5. Send the Fee and Debt Payment
+
+First, if a fee was owed, it is sent to the token distributor:
+
+```solidity
+i_core.transferToFeeCollectionAddress(
+    _reserve,
+    msg.sender,
+    vars.originationFee,
+    i_addressesProvider.getTokenDistributor()
+);
+```
+
+Then the debt portion returns to reserve liquidity:
+
+```solidity
+i_core.transferToReserve(
+    _reserve,
+    payable(msg.sender),
+    vars.paybackAmountMinusFees
+);
+```
+
+For an ERC20 repayment in this normal branch, both transfers pull from
+`msg.sender`. Therefore, the payer must approve `LendingPoolCore` for the fee
+plus the debt portion. This also makes ordinary repay-on-behalf possible:
+
+```text
+Bob approves LendingPoolCore for 104 DAI
+Bob calls repay(DAI, 104 DAI, Alice)
+Alice's debt and fee are paid down
+```
+
+For ETH, the pool forwards the fee part to the token distributor and forwards
+the remaining `msg.value` to the core as reserve liquidity. If more ETH was
+sent than needed, `transferToReserve()` refunds the excess to `msg.sender`.
+
+# 6. Emit `Repay`
+
+```solidity
+emit Repay(
+    _reserve,
+    _onBehalfOf,
+    msg.sender,
+    vars.paybackAmountMinusFees,
+    vars.originationFee,
+    vars.borrowBalanceIncrease,
+    block.timestamp
+);
+```
+
+The event distinguishes the borrower (`_onBehalfOf`) from the account that
+provided the repayment (`msg.sender`). Its amount field excludes fees, so an
+indexer can separately identify the debt reduction and protocol fee.
+
+# Complete Repayment Example
+
+Assume Alice borrowed DAI and now has the following position:
+
+```text
+stored principal = 100 DAI
+accrued interest =   3 DAI
+compounded debt  = 103 DAI
+origination fee  =   1 DAI
+```
+
+Alice approves `LendingPoolCore` for `104 DAI` and calls:
+
+```solidity
+lendingPool.repay(
+    DAI,
+    type(uint256).max,
+    payable(Alice)
+);
+```
+
+The flow is:
+
+```text
+1. Read Alice's debt: 100 DAI principal + 3 DAI accrued interest = 103 DAI.
+2. Read Alice's outstanding fee: 1 DAI.
+3. Resolve “repay everything” to 104 DAI.
+4. Allocate 1 DAI to the fee and 103 DAI to the debt.
+5. Clear Alice's DAI borrow state and reduce the reserve's total borrows by 103 DAI.
+6. Transfer 1 DAI from Alice to the token distributor.
+7. Transfer 103 DAI from Alice back to LendingPoolCore.
+8. Emit Repay with amountMinusFees = 103 DAI and fees = 1 DAI.
+```
+
+The final result is:
+
+```text
+Alice pays                 104 DAI
+token distributor receives   1 DAI
+LendingPoolCore receives   103 DAI
+Alice's DAI debt             0 DAI
+Alice's DAI fee              0 DAI
+```
+
+# Partial Repayment Example
+
+With the same `103 DAI` debt and `1 DAI` fee, Alice repays `40 DAI`:
+
+```solidity
+lendingPool.repay(
+    DAI,
+    40 ether,
+    payable(Alice)
+);
+```
+
+The fee is paid first:
+
+```text
+payment                    = 40 DAI
+fee paid                   =  1 DAI
+debt repaid                = 39 DAI
+remaining compounded debt  = 64 DAI
+remaining fee              =  0 DAI
+```
+
+The `Repay` event records `39 DAI` as `_amountMinusFees`, `1 DAI` as `_fees`,
+and `3 DAI` as the interest accrued since Alice's prior debt update.
+
+# Repay Order
+
+```text
+validate reserve and amount
+        ↓
+read compounded debt, accrued interest, and outstanding fee
+        ↓
+resolve full or partial payment and validate ETH value
+        ↓
+apply payment to fee first
+        ↓
+LendingPoolCore updates borrower debt, reserve totals, and rates
+        ↓
+send fee to token distributor and debt portion to reserve liquidity
+        ↓
+emit Repay
+```
+
+If any validation, accounting update, fee transfer, or reserve transfer fails,
+the entire repayment transaction reverts.
