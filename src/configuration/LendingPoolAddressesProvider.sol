@@ -35,7 +35,6 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
     ////////////////////////////////
     //            Errors          //
     ////////////////////////////////
-    error LendingPoolAddressesProvider__ZeroAddress();
     ///////////////////////////////////
     //            Libraries          //
     ///////////////////////////////////
@@ -49,6 +48,7 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
     bytes32 private constant PRICE_ORACLE = "PRICE_ORACLE";
     bytes32 private constant FEE_PROVIDER = "FEE_PROVIDER";
     bytes32 private constant LENDING_POOL_PARAMETERS_PROVIDER = "PARAMETERS_PROVIDER";
+    bytes32 private constant TOKEN_DISTRIBUTOR = "TOKEN_DISTRIBUTOR";
 
     ////////////////////////////////
     //           Events           //
@@ -60,6 +60,7 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
     event PriceOracleUpdated(address indexed newAddress);
     event FeeProviderUpdated(address indexed newAddress);
     event LendingPoolParametersProviderUpdated(address indexed newAddress);
+    event TokenDistributorUpdated(address indexed newAddress);
 
     ////////////////////////////////
     //          Modifiers         //
@@ -73,59 +74,43 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
     //     External Functions     //
     ////////////////////////////////
     function setLendingPool(address _pool) external onlyOwner {
-        if (_pool == address(0)) {
-            revert LendingPoolAddressesProvider__ZeroAddress();
-        }
         _setAddress(LENDING_POOL, _pool);
         emit LendingPoolUpdated(_pool);
     }
 
     function setLendingPoolCore(address _lendingPoolCore) external onlyOwner {
-        if (_lendingPoolCore == address(0)) {
-            revert LendingPoolAddressesProvider__ZeroAddress();
-        }
         _setAddress(LENDING_POOL_CORE, _lendingPoolCore);
         emit LendingPoolCoreUpdated(_lendingPoolCore);
     }
 
     function setLendingPoolConfigurator(address _configurator) external onlyOwner {
-        if (_configurator == address(0)) {
-            revert LendingPoolAddressesProvider__ZeroAddress();
-        }
         _setAddress(LENDING_POOL_CONFIGURATOR, _configurator);
         emit LendingPoolConfiguratorUpdated(_configurator);
     }
 
     function setLendingPoolDataProvider(address _provider) external onlyOwner {
-        if (_provider == address(0)) {
-            revert LendingPoolAddressesProvider__ZeroAddress();
-        }
         _setAddress(DATA_PROVIDER, _provider);
         emit LendingPoolDataProviderUpdated(_provider);
     }
 
     function setPriceOracle(address _priceOracle) external onlyOwner {
-        if (_priceOracle == address(0)) {
-            revert LendingPoolAddressesProvider__ZeroAddress();
-        }
         _setAddress(PRICE_ORACLE, _priceOracle);
         emit PriceOracleUpdated(_priceOracle);
     }
 
     function setFeeProvider(address _feeProvider) external onlyOwner {
-        if (_feeProvider == address(0)) {
-            revert LendingPoolAddressesProvider__ZeroAddress();
-        }
         _setAddress(FEE_PROVIDER, _feeProvider);
         emit FeeProviderUpdated(_feeProvider);
     }
 
     function setLendingPoolParametersProvider(address _parametersProvider) external onlyOwner {
-        if (_parametersProvider == address(0)) {
-            revert LendingPoolAddressesProvider__ZeroAddress();
-        }
         _setAddress(LENDING_POOL_PARAMETERS_PROVIDER, _parametersProvider);
         emit LendingPoolParametersProviderUpdated(_parametersProvider);
+    }
+
+    function setTokenDistributor(address _tokenDistributor) external onlyOwner {
+        _setAddress(TOKEN_DISTRIBUTOR, _tokenDistributor);
+        emit TokenDistributorUpdated(_tokenDistributor);
     }
 
     ////////////////////////////////
@@ -166,5 +151,9 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
 
     function getLendingPoolParametersProvider() external view returns (address) {
         return getAddress(LENDING_POOL_PARAMETERS_PROVIDER);
+    }
+
+    function getTokenDistributor() external view returns (address) {
+        return getAddress(TOKEN_DISTRIBUTOR);
     }
 }
