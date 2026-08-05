@@ -110,7 +110,7 @@ contract ATokenIntegrationTest is Test {
     function testUserCanRedeemEntireBalanceWithMaxUintWithoutAccruedInterest() external {
         uint256 depositAmount = 100 ether;
         uint16 referralCode = 0;
-        
+
         vm.startPrank(user);
         dai.approve(address(core), depositAmount);
         pool.deposit(address(dai), depositAmount, referralCode);
