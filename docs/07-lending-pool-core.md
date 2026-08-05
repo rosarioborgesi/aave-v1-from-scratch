@@ -1953,3 +1953,119 @@ For example, a reserve with `800 DAI` borrowed and `200 DAI` available has:
 ```
 
 so the function returns `0.80 ray`. This getter only reports the current ratio; it does not update reserve state or interest rates.
+
+# Repayment State Update
+
+## `updateStateOnRepay`
+
+```solidity
+function updateStateOnRepay(
+    address _reserve,
+    address _user,
+    uint256 _paybackAmountMinusFees,
+    uint256 _originationFeeRepaid,
+    uint256 _balanceIncrease,
+    bool _repaidWholeLoan
+) external onlyLendingPool
+```
+
+Updates the state of the core as a consequence of a repay action.
+
+This is the accounting entry point for a repayment accepted by `LendingPool`. It does not pull tokens from the repayer; `LendingPool` performs that separately through `transferToFeeCollectionAddress()` and `transferToReserve()`.
+
+The core trusts its caller: it does not verify that the amount is valid for the user. `LendingPool` supplies the current `balanceIncrease` obtained from `getUserBorrowBalances()` and splits the payment into principal/interest repayment and origination-fee repayment.
+
+The operations occur in this order:
+
+```text
+1. Checkpoint reserve indexes and update the reserve's stable or variable debt total.
+2. Update the user's principal, fee, rate/index checkpoint, and timestamp.
+3. Reprice the reserve as though `_paybackAmountMinusFees` has been added to liquidity.
+```
+
+The fee is deliberately not counted as new reserve liquidity: it is sent to the protocol fee collector rather than remaining available to suppliers.
+
+For a fee-only repayment, `_paybackAmountMinusFees` is zero. The user's accumulated borrowing interest is still materialized into debt totals and their principal, while only the outstanding origination fee is reduced.
+
+## `_updateReserveStateOnRepay`
+
+```solidity
+function _updateReserveStateOnRepay(
+    address _reserve,
+    address _user,
+    uint256 _paybackAmountMinusFees,
+    uint256 _balanceIncrease
+) internal
+```
+
+Updates the state of the reserve as a consequence of a repay action.
+
+This function keeps the reserve-wide debt totals aligned with the borrower's repayment.
+
+First it determines the user's current mode, then calls `updateCumulativeIndexes()`. That checkpoints supplier and variable-borrow index growth using the rates that applied before the repayment changes liquidity or debt totals.
+
+It then applies the same accounting formula to the appropriate reserve aggregate:
+
+```text
+new total debt = old recorded total + user's accrued interest - repayment excluding fees
+```
+
+For a stable borrower, it uses `totalBorrowsStable` and calls the weighted-average stable-rate helpers when adding `balanceIncrease` and subtracting the repayment. The user's `stableBorrowRate` is supplied to both helpers because that is the rate associated with the affected stable debt.
+
+For a variable borrower, it performs the corresponding additions and subtractions on `totalBorrowsVariable`. There is no average variable rate to maintain; variable positions are represented by the shared variable-borrow index.
+
+## `_updateUserStateOnRepay`
+
+```solidity
+function _updateUserStateOnRepay(
+    address _reserve,
+    address _user,
+    uint256 _paybackAmountMinusFees,
+    uint256 _originationFeeRepaid,
+    uint256 _balanceIncrease,
+    bool _repaidWholeLoan
+) internal
+```
+
+Updates the state of the user as a consequence of a repay action.
+
+This function writes the borrower's individual position after the reserve totals have been updated.
+
+It first materializes the interest accrued since the user's prior update, then removes the non-fee portion of the payment:
+
+```text
+new principalBorrowBalance =
+    old principalBorrowBalance
+    + balanceIncrease
+    - paybackAmountMinusFees
+```
+
+It saves the reserve's current variable-borrow index as the user's new checkpoint. This makes a remaining variable debt position accrue only from the repayment block forward.
+
+If `_repaidWholeLoan` is true, the function clears both rate-mode markers:
+
+```text
+stableBorrowRate = 0
+lastVariableBorrowCumulativeIndex = 0
+```
+
+With a zero principal balance, this makes `getUserCurrentBorrowRateMode()` return `NONE`. Finally, the function subtracts `_originationFeeRepaid` from the user's outstanding fee and records `block.timestamp` as the user's latest debt update.
+
+# Collecting Origination Fees
+
+## `transferToFeeCollectionAddress`
+
+```solidity
+function transferToFeeCollectionAddress(
+    address _token,
+    address _user,
+    uint256 _amount,
+    address _destination
+) external payable onlyLendingPool
+```
+
+This function moves the origination-fee portion of a repayment to the protocol's fee collector. It does not alter debt accounting; that is completed first by `updateStateOnRepay()`.
+
+For an ERC20 reserve, no ETH may accompany the call. The core uses `safeTransferFrom(_user, _destination, _amount)`, so `_user` must have approved `LendingPoolCore` for the fee amount.
+
+For the ETH reserve, `msg.value` must be at least `_amount`, and the core sends exactly `_amount` ETH to `_destination`. Any value above `_amount` remains in the core, so callers should pass the exact fee amount. `LendingPool.repay()` does so in its normal fee-transfer path.
