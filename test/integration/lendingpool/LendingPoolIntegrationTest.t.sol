@@ -697,8 +697,8 @@ contract LendingPoolIntegrationTest is Test {
         // origination fee (0.25%)  = 0.00005 ETH
         // total debt               = 0.02005 ETH
         // liquidation threshold    = 80%
-        // minimum collateral       = 0.02005 / 0.80 = 0.0250625 ETH    
-        // 
+        // minimum collateral       = 0.02005 / 0.80 = 0.0250625 ETH
+        //
         // since 1 ETH = 2,000 DAI -> 1 DAI = 0.0005 ETH
         // minimum collateral       = 0.0250625 / 0.0005 = 50,125 DAI
         //
@@ -784,7 +784,7 @@ contract LendingPoolIntegrationTest is Test {
         uint256 wethLiquidity = 1 ether;
         uint256 firstBorrowAmount = 0.02 ether;
         uint256 secondBorrowAmount = 0.005 ether;
-        uint256 variableBorrowRate = 0.10e27;
+        uint256 variableBorrowRate = 0.1e27;
         uint16 referralCode = 0;
 
         // The mock strategy supplies a 10% annual variable rate. This rate is
@@ -821,7 +821,7 @@ contract LendingPoolIntegrationTest is Test {
             // where:
             // - P = starting value, initial borrow index = 1
             // - r = annual rate, 0.10 (10%)
-            // - n = number of compounding periods in one year, here 365 days = 31,536,00 seconds  
+            // - n = number of compounding periods in one year, here 365 days = 31,536,00 seconds
             uint256 expectedVariableBorrowIndex =
                 WadRayMath.ray().rayMul((WadRayMath.ray() + variableBorrowRate / 365 days).rayPow(365 days)); //≈ 1.1051709e27
             uint256 expectedAccruedDebt = firstBorrowAmount.rayMul(expectedVariableBorrowIndex); // = 0.02 × 1.1051709 ≈ 0.022103418 WETH
@@ -855,7 +855,7 @@ contract LendingPoolIntegrationTest is Test {
             assertEq(compoundedBorrowBalance, expectedPrincipalBorrowBalance);
 
             // No time has passed since the second borrow, so its interest has not yet accrued.
-            assertEq(borrowBalanceIncrease, 0); 
+            assertEq(borrowBalanceIncrease, 0);
 
             // Variable borrow totals include the materialized interest and the
             // second loan; no stable-rate debt was created.
@@ -877,7 +877,6 @@ contract LendingPoolIntegrationTest is Test {
             uint256 currentLtv,
             uint256 currentLiquidationThreshold,
             uint256 healthFactor,
-
         ) = dataProvider.calculateUserGlobalData(user);
         uint256 expectedHealthFactor =
             (0.05 ether * currentLiquidationThreshold / 100).wadDiv(totalBorrowBalanceETH + 0.0000625 ether);
@@ -924,8 +923,7 @@ contract LendingPoolIntegrationTest is Test {
             uint256 totalLiquidityBalanceETH,
             uint256 totalCollateralBalanceETH,
             uint256 totalBorrowBalanceETH,
-            uint256 totalFeesETH,
-            ,
+            uint256 totalFeesETH,,
             uint256 currentLiquidationThreshold,
             uint256 healthFactor,
             bool healthFactorBelowThreshold
@@ -934,8 +932,8 @@ contract LendingPoolIntegrationTest is Test {
         // expectedCollateralBalanceETH = depositAmount * shockedDaiPrice / 1 ether;
         // expectedCollateralBalanceETH = 100 DAI * 0.00025 ETH/DAI = 0.025 ETH
         uint256 expectedCollateralBalanceETH = depositAmount * shockedDaiPrice / 1 ether;
-        
-        // health factor = (collateral value * liquidation threshold) / (borrowed amount + fee) 
+
+        // health factor = (collateral value * liquidation threshold) / (borrowed amount + fee)
         // health factor = (0.025 * 80/100) / (0.02 + 0.00005) =  0.02 / 0.02005 = 0.997506234413965087
         uint256 expectedHealthFactor =
             (expectedCollateralBalanceETH * currentLiquidationThreshold / 100).wadDiv(borrowAmount + borrowFee);
