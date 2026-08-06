@@ -31,6 +31,7 @@ import {LendingPoolDataProvider} from "./LendingPoolDataProvider.sol";
 import {IFeeProvider} from "src/interfaces/IFeeProvider.sol";
 import {LendingPoolParametersProvider} from "src/configuration/LendingPoolParametersProvider.sol";
 import {CoreLibrary} from "src/libraries/CoreLibrary.sol";
+import {EthAddressLib} from "src/libraries/EthAddressLib.sol";
 
 /**
  * @title LendingPool contract
@@ -55,6 +56,9 @@ contract LendingPool is ReentrancyGuard {
     error LendingPool__InsufficientCollateralToCoverNewBorrow();
     error LendingPool__UserCannotBorrowAmountAtStableRate();
     error LendingPool__UserIsBorrowingTooMuchLiquidityAtStableRate();
+    error LendingPool__NoBorrowPending();
+    error LendingPool__ExplicitAmountRequiredForRepayOnBehalf();
+    error LendingPool__InvalidETHRepaymentAmount();
 
     //////////////////////////////////
     //      Type declarations       //
@@ -79,6 +83,20 @@ contract LendingPool is ReentrancyGuard {
         uint256 finalUserBorrowRate;
         CoreLibrary.InterestRateMode rateMode;
         bool healthFactorBelowThreshold;
+    }
+
+    /**
+     * @dev data structures for local computations in the repay() method.
+     */
+    struct RepayLocalVars {
+        uint256 principalBorrowBalance;
+        uint256 compoundedBorrowBalance;
+        uint256 borrowBalanceIncrease;
+        bool isETH;
+        uint256 paybackAmount;
+        uint256 paybackAmountMinusFees;
+        uint256 currentStableRate;
+        uint256 originationFee;
     }
 
     ////////////////////////////////
@@ -138,6 +156,27 @@ contract LendingPool is ReentrancyGuard {
         uint256 _originationFee,
         uint256 _borrowBalanceIncrease,
         uint16 indexed _referral,
+        uint256 _timestamp
+    );
+
+    /**
+     * @dev emitted on repay
+     * @param _reserve the address of the reserve
+     * @param _user the address of the user for which the repay has been executed
+     * @param _repayer the address of the user that has performed the repay action
+     * @param _amountMinusFees the amount repaid minus fees
+     * @param _fees the fees repaid
+     * @param _borrowBalanceIncrease the balance increase since the last action
+     * @param _timestamp the timestamp of the action
+     *
+     */
+    event Repay(
+        address indexed _reserve,
+        address indexed _user,
+        address indexed _repayer,
+        uint256 _amountMinusFees,
+        uint256 _fees,
+        uint256 _borrowBalanceIncrease,
         uint256 _timestamp
     );
 
@@ -415,6 +454,122 @@ contract LendingPool is ReentrancyGuard {
             vars.borrowFee,
             vars.borrowBalanceIncrease,
             _referralCode,
+            block.timestamp
+        );
+    }
+
+    /**
+     * @notice repays a borrow on the specific reserve, for the specified amount (or for the whole amount, if uint256(-1) is specified).
+     * @dev the target user is defined by _onBehalfOf. If there is no repayment on behalf of another account,
+     * _onBehalfOf must be equal to msg.sender.
+     * @param _reserve the address of the reserve on which the user borrowed
+     * @param _amount the amount to repay, or type(uint256).max if the user wants to repay everything
+     * @param _onBehalfOf the address for which msg.sender is repaying.
+     *
+     */
+    function repay(address _reserve, uint256 _amount, address payable _onBehalfOf)
+        external
+        payable
+        nonReentrant
+        onlyActiveReserve(_reserve)
+        onlyAmountGreaterThanZero(_amount)
+    {
+        // Stores intermediate values in memory and avoids "stack too deep".
+        RepayLocalVars memory vars;
+
+        // Get the borrower's current debt position:
+        // - principalBorrowBalance: debt before newly accrued interest
+        // - compoundedBorrowbalance: total debt including accrued interest
+        // - borrowBalanceIncrease: interest accrued since the last update
+        (vars.principalBorrowBalance, vars.compoundedBorrowBalance, vars.borrowBalanceIncrease) =
+            i_core.getUserBorrowBalances(_reserve, _onBehalfOf);
+
+        // Get the protocol fee still owed by the borrower.
+        vars.originationFee = i_core.getUserOriginationFee(_reserve, _onBehalfOf);
+
+        // ETH repayments use msg.value; ERC-20 repayments use transferFrom.
+        vars.isETH = EthAddressLib.ethAddress() == _reserve;
+
+        // A user cannot repay if they have no outstanding debt
+        if (vars.compoundedBorrowBalance == 0) {
+            revert LendingPool__NoBorrowPending();
+        }
+
+        // type(uint256).max means "repay everything".
+        // This shortcut is allowed only when repaying your own loan.
+        // A third party must choose an explicit amount.
+        if (_amount == type(uint256).max && msg.sender != _onBehalfOf) {
+            revert LendingPool__ExplicitAmountRequiredForRepayOnBehalf();
+        }
+
+        // By default, repay the entire debt plus the outstanding origination fee.
+        vars.paybackAmount = vars.compoundedBorrowBalance + vars.originationFee;
+
+        // For a partial repayment, use the requested amount if it is lower
+        // than the total amount owed
+        if (_amount != type(uint256).max && _amount < vars.paybackAmount) {
+            vars.paybackAmount = _amount;
+        }
+
+        // ETH repayments must incude enough native ETH in the transaction
+        if (vars.isETH && msg.value < vars.paybackAmount) {
+            revert LendingPool__InvalidETHRepaymentAmount();
+        }
+
+        // The origination fee has priority over loan repayment.
+        // If the amount is not enough to cover the fee, no debt is repaid.
+        if (vars.paybackAmount <= vars.originationFee) {
+            // Reduce only the outstanding fee. The debt amount stays unchanged.
+            i_core.updateStateOnRepay(_reserve, _onBehalfOf, 0, vars.paybackAmount, vars.borrowBalanceIncrease, false);
+
+            // Send the paid fee to the protocol fee collector.
+            i_core.transferToFeeCollectionAddress{value: vars.isETH ? vars.paybackAmount : 0}(
+                _reserve, _onBehalfOf, vars.paybackAmount, i_addressesProvider.getTokenDistributor()
+            );
+
+            emit Repay(
+                _reserve, _onBehalfOf, msg.sender, 0, vars.paybackAmount, vars.borrowBalanceIncrease, block.timestamp
+            );
+
+            return;
+        }
+
+        // At this point, the fee is fully covered.
+        // The remaining amount is used to reduce the borrower's debt.
+        vars.paybackAmountMinusFees = vars.paybackAmount - vars.originationFee;
+
+        // Update the borrower's debt, reserve borrow totals, and interest rates.
+        // The final bool is true only when all compounded debt was repaid.
+        i_core.updateStateOnRepay(
+            _reserve,
+            _onBehalfOf,
+            vars.paybackAmountMinusFees,
+            vars.originationFee,
+            vars.borrowBalanceIncrease,
+            vars.compoundedBorrowBalance == vars.paybackAmountMinusFees
+        );
+
+        // Send the paid fee to the protocol fee collector.
+        if (vars.originationFee > 0) {
+            i_core.transferToFeeCollectionAddress{value: vars.isETH ? vars.originationFee : 0}(
+                _reserve, msg.sender, vars.originationFee, i_addressesProvider.getTokenDistributor()
+            );
+        }
+
+        // Transfer the debt-repayment portion back to the reserve.
+        // For ETH, transferToReserve refunds any msg.value sent in excess.
+        // For ERC-20 tokens, the payer must have approved LendingPoolCore.
+        i_core.transferToReserve{value: vars.isETH ? msg.value - vars.originationFee : 0}(
+            _reserve, payable(msg.sender), vars.paybackAmountMinusFees
+        );
+
+        emit Repay(
+            _reserve,
+            _onBehalfOf,
+            msg.sender,
+            vars.paybackAmountMinusFees,
+            vars.originationFee,
+            vars.borrowBalanceIncrease,
             block.timestamp
         );
     }

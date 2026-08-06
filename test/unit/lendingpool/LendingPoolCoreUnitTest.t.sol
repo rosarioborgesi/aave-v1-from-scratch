@@ -3032,21 +3032,21 @@ contract LendingPoolCoreUnitTest is Test {
         // Calling _updateReserveStateOnRepay(...) should do 2 things
         // 1. Update variable debt:
         //    -  new variable debt = old variable debt + accrued interest - repayment
-        //                         = 100 + 10 - 30 
-        //                         = 80 ether          
+        //                         = 100 + 10 - 30
+        //                         = 80 ether
         //    -  Stable debt remains 50 ether, and its average stable rate remains unchanged because the
         //          repayment was variable-rate
         // 2. Checkpoint the reserve's interest indexes at the current timestamp:
         //    - `lastLiquidityCumulativeIndex` rises from RAY to RAY + oldLiquidityRate because interest uses
         //          a linea one-year calculation
-        //    - `lastVariableBorrowCumulativeIndex` compounds for a year at the variable rate       
+        //    - `lastVariableBorrowCumulativeIndex` compounds for a year at the variable rate
 
         CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
         uint256 expectedVariableIndex = RAY.rayMul((RAY + oldVariableBorrowRate / 365 days).rayPow(365 days));
 
         // new variable debt = old variable debt + accrued interest - repayment
-        //                   = 100 + 10 - 30 
-        //                   = 80 ether   
+        //                   = 100 + 10 - 30
+        //                   = 80 ether
         assertEq(reserve.totalBorrowsVariable, 100 ether + balanceIncrease - repaymentAmount);
         // Stable borrow rate is unchanged
         assertEq(reserve.totalBorrowsStable, 50 ether);
@@ -3108,10 +3108,11 @@ contract LendingPoolCoreUnitTest is Test {
 
         CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
         uint256 expectedStableDebt = initialTotalStableDebt + balanceIncrease - repaymentAmount; // 200 + 10 - 40 = 170 DAI
-        
+
         // expectedAverageStableRate = (70 x 5% + 100 x 10%) / 170 = 13.5 / 170 ≈ 7.941176%
         uint256 expectedAverageStableRate = (uint256(70 ether).wadToRay().rayMul(userStableRate)
-            + otherBorrowerPrincipal.wadToRay().rayMul(otherBorrowerStableRate)).rayDiv(expectedStableDebt.wadToRay());
+                + otherBorrowerPrincipal.wadToRay().rayMul(otherBorrowerStableRate))
+        .rayDiv(expectedStableDebt.wadToRay());
 
         assertEq(reserve.totalBorrowsStable, expectedStableDebt);
         assertEq(reserve.totalBorrowsVariable, 0);
@@ -3159,7 +3160,10 @@ contract LendingPoolCoreUnitTest is Test {
 
     // This test verifies that a variable-rate repayment cannot remove more debt
     // from the reserve than is outstanding after accrued interest is included.
-    function testUpdateReserveStateOnRepayRevertsWhenVariableRepaymentExceedsDebt() external withInitReserve(address(token)) {
+    function testUpdateReserveStateOnRepayRevertsWhenVariableRepaymentExceedsDebt()
+        external
+        withInitReserve(address(token))
+    {
         // The reserve has 100 DAI of variable debt and no stable debt.
         core.setReserveBorrows(address(token), 0, 100 ether);
         // stableBorrowRate = 0 identifies this as a variable-rate loan.
@@ -3186,7 +3190,10 @@ contract LendingPoolCoreUnitTest is Test {
 
     // This test verifies that a stable-rate repayment cannot remove more debt
     // from the reserve than is outstanding after accrued interest is included.
-    function testUpdateReserveStateOnRepayRevertsWhenStableRepaymentExceedsDebt() external withInitReserve(address(token)) {
+    function testUpdateReserveStateOnRepayRevertsWhenStableRepaymentExceedsDebt()
+        external
+        withInitReserve(address(token))
+    {
         uint256 stableRate = 5e25; // 5%
 
         // The reserve has one 100 DAI stable-rate loan and no variable debt.
@@ -3335,5 +3342,4 @@ contract LendingPoolCoreUnitTest is Test {
         vm.expectRevert(abi.encodeWithSignature("Panic(uint256)", 0x11));
         core.exposedUpdateUserStateOnRepay(address(token), user, 111 ether, 0, 10 ether, false);
     }
-   
 }
