@@ -24,6 +24,7 @@ contract MockLendingPoolCore {
     mapping(address reserve => bool isAdded) private s_isReserveAdded;
     mapping(address reserve => TestReserveData data) private s_testReserveData;
     mapping(address user => mapping(address reserve => TestUserReserveData data)) private s_testUserReserveData;
+    mapping(address reserve => uint256 liquidationBonus) private s_liquidationBonuses;
 
     /////////////////////////////////
     //      Type declarations      //
@@ -85,8 +86,12 @@ contract MockLendingPoolCore {
         uint256 originationFee,
         bool useAsCollateral
     ) external {
-        s_testUserReserveData[user][reserve] =
-            TestUserReserveData(liquidityBalance, borrowBalance, originationFee, useAsCollateral);
+        s_testUserReserveData[user][reserve] = TestUserReserveData({
+            liquidityBalance: liquidityBalance,
+            borrowBalance: borrowBalance,
+            originationFee: originationFee,
+            useAsCollateral: useAsCollateral
+        });
     }
 
     function setReserveNormalizedIncome(address reserve, uint256 normalizedIncome) external {
@@ -99,6 +104,10 @@ contract MockLendingPoolCore {
 
     function setReserveATokenAddress(address reserve, address aTokenAddress) external {
         s_testReserveData[reserve].aTokenAddress = aTokenAddress;
+    }
+
+    function setReserveLiquidationBonus(address reserve, uint256 liquidationBonus) external {
+        s_liquidationBonuses[reserve] = liquidationBonus;
     }
 
     function getReserves() external view returns (address[] memory) {
@@ -147,6 +156,10 @@ contract MockLendingPoolCore {
 
     function getReserveIsActive(address reserve) external view returns (bool) {
         return s_testReserveData[reserve].isActive;
+    }
+
+    function getReserveLiquidationBonus(address reserve) external view returns (uint256) {
+        return s_liquidationBonuses[reserve];
     }
 
     function getReserveAvailableLiquidity(address reserve) external view returns (uint256) {

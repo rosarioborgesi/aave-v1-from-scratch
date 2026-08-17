@@ -43,6 +43,7 @@ contract AToken is ERC20 {
     error AToken__AmountIsZero();
     error AToken__AmountToRedeemGreaterThanCurrentBalance();
     error AToken__TransferNotAllowed();
+    error AToken__AmountMustBeGreaterThanZero();
 
     ///////////////////////////////////
     //            Libraries          //
@@ -59,10 +60,6 @@ contract AToken is ERC20 {
 
     // the last reserve normalized income already applied to that user
     mapping(address user => uint256 lastNormalizedIncome) internal s_userIndexes;
-    // TODO need to check interestRedirectionAddresses
-    mapping(address => address) internal s_interestRedirectionAddresses;
-    // TODO need to check redirectedBalances
-    mapping(address => uint256) internal s_redirectedBalances;
 
     LendingPoolAddressesProvider private immutable i_addressesProvider;
     LendingPoolCore private immutable i_core;
@@ -81,39 +78,6 @@ contract AToken is ERC20 {
      *
      */
     event MintOnDeposit(address indexed _from, uint256 _value, uint256 _fromBalanceIncrease, uint256 _fromIndex);
-    /**
-     * @dev emitted when the redirected balance of an user is being updated
-     * @param _targetAddress the address of which the balance is being updated
-     * @param _targetBalanceIncrease the cumulated balance since the last update of the target
-     * @param _targetIndex the last index of the user
-     * @param _redirectedBalanceAdded the redirected balance being added
-     * @param _redirectedBalanceRemoved the redirected balance being removed
-     *
-     */
-    event RedirectedBalanceUpdated(
-        address indexed _targetAddress,
-        uint256 _targetBalanceIncrease,
-        uint256 _targetIndex,
-        uint256 _redirectedBalanceAdded,
-        uint256 _redirectedBalanceRemoved
-    );
-
-    /**
-     * @dev emitted when the accumulation of the interest
-     * by an user is redirected to another user
-     * @param _from the address from which the interest is being redirected
-     * @param _to the adress of the destination
-     * @param _fromBalanceIncrease the cumulated balance since the last update of the user
-     * @param _fromIndex the last index of the user
-     *
-     */
-    event InterestStreamRedirected(
-        address indexed _from,
-        address indexed _to,
-        uint256 _redirectedBalance,
-        uint256 _fromBalanceIncrease,
-        uint256 _fromIndex
-    );
 
     /**
      * @dev emitted after the redeem action
@@ -124,6 +88,38 @@ contract AToken is ERC20 {
      *
      */
     event Redeem(address indexed _from, uint256 _value, uint256 _fromBalanceIncrease, uint256 _fromIndex);
+
+    /**
+     * @dev emitted during the transfer action
+     * @param _from the address from which the tokens are being transferred
+     * @param _to the adress of the destination
+     * @param _value the amount to be minted
+     * @param _fromBalanceIncrease the cumulated balance since the last update of the user
+     * @param _toBalanceIncrease the cumulated balance since the last update of the destination
+     * @param _fromIndex the last index of the user
+     * @param _toIndex the last index of the liquidator
+     *
+     */
+    event BalanceTransfer(
+        address indexed _from,
+        address indexed _to,
+        uint256 _value,
+        uint256 _fromBalanceIncrease,
+        uint256 _toBalanceIncrease,
+        uint256 _fromIndex,
+        uint256 _toIndex
+    );
+
+    /**
+     * @dev emitted during the liquidation action, when the liquidator reclaims the underlying
+     * asset
+     * @param _from the address from which the tokens are being burned
+     * @param _value the amount to be burned
+     * @param _fromBalanceIncrease the cumulated balance since the last update of the user
+     * @param _fromIndex the last index of the user
+     *
+     */
+    event BurnOnLiquidation(address indexed _from, uint256 _value, uint256 _fromBalanceIncrease, uint256 _fromIndex);
     ////////////////////////////////
     //          Modifiers         //
     ////////////////////////////////
@@ -178,11 +174,6 @@ contract AToken is ERC20 {
         // Cumulates the balance of the user
         (,, uint256 balanceIncrease, uint256 index) = _cumulateBalance(_account);
 
-        // If the user is redirecting his interest towards someone else,
-        // we update the redirected balance of the redirection address by adding the accrued interest
-        // and the amount deposited
-        _updateRedirectedBalanceOfRedirectionAddress(_account, balanceIncrease + _amount, 0);
-
         // Mint an equivalent amount of tokens to cover the new deposit
         _mint(_account, _amount);
 
@@ -219,11 +210,6 @@ contract AToken is ERC20 {
             revert AToken__TransferNotAllowed();
         }
 
-        // If the user is redirecting his interest towards someone else,
-        // we update the redirected balance of the redirection address by adding accrued interest,
-        // and removing the amount to redeem
-        _updateRedirectedBalanceOfRedirectionAddress(msg.sender, balanceIncrease, amountToRedeem);
-
         // burn tokens equivalent to the amount requested
         _burn(msg.sender, amountToRedeem);
 
@@ -241,13 +227,49 @@ contract AToken is ERC20 {
         emit Redeem(msg.sender, amountToRedeem, balanceIncrease, userIndexReset ? 0 : index);
     }
 
+    /**
+     * @dev transfers tokens in the event of a borrow being liquidated, in case the liquidators reclaims the aToken
+     *      only lending pools can call this function
+     * @param _from the address from which transfer the aTokens
+     * @param _to the destination address
+     * @param _value the amount to transfer
+     *
+     */
+    function transferOnLiquidation(address _from, address _to, uint256 _value) external onlyLendingPool {
+        _executeTransfer(_from, _to, _value);
+    }
+
+    /**
+     * @dev burns token in the event of a borrow being liquidated, in case the liquidators reclaims the underlying asset
+     * Transfer of the liquidated asset is executed by the lending pool contract.
+     * only lending pools can call this function
+     * @param _account the address from which burn the aTokens
+     * @param _value the amount to burn
+     *
+     */
+    function burnOnLiquidation(address _account, uint256 _value) external onlyLendingPool {
+        // Realize all interest accrued by _account since its last balance update
+        (, uint256 accountBalance, uint256 balanceIncrease, uint256 index) = _cumulateBalance(_account);
+
+        // burns the requested amount of tokens. This is ERC20-burn
+        _burn(_account, _value);
+
+        // Initializes a flag used to choose the correct index value for the event.
+        bool userIndexReset = false;
+        // Reset the user data if the remaining balance is 0
+        if (accountBalance - _value == 0) {
+            userIndexReset = _resetDataOnZeroBalance(_account);
+        }
+
+        emit BurnOnLiquidation(_account, _value, balanceIncrease, userIndexReset ? 0 : index);
+    }
+
     ////////////////////////////////
     //       Public Functions     //
     ////////////////////////////////
 
     /**
-     * @dev calculates the balance of the user, which is the
-     * principal balance + interest generated by the principal balance + interest generated by the redirected balance
+     * @dev calculates the balance of the user, including interest accrued on their principal balance.
      * @param _user the user for which the balance is being calculated
      * @return the total balance of the user
      *
@@ -255,25 +277,13 @@ contract AToken is ERC20 {
     function balanceOf(address _user) public view override returns (uint256) {
         // Current principal balance of the user
         uint256 currentPrincipalBalance = super.balanceOf(_user);
-        // Balance redirected by other users to _user for interest rate accrual
-        uint256 redirectedBalance = s_redirectedBalances[_user];
 
-        if (currentPrincipalBalance == 0 && redirectedBalance == 0) {
+        if (currentPrincipalBalance == 0) {
             return 0;
         }
 
-        // If the _user is not redirecting the interest to anybody, accrues
-        // the interest for himself
-        if (s_interestRedirectionAddresses[_user] == address(0)) {
-            // Accruing for himself means that both the principal balance and
-            // the redirected balance partecipate in the interest
-            return _calculateCumulatedBalance(_user, currentPrincipalBalance + redirectedBalance) - redirectedBalance;
-        } else {
-            // If the user redirected the interest, then only the redirected
-            // balance generates interest. In that case, the interest generated
-            // by the redirected balance is added to the current principal balance.
-            return currentPrincipalBalance + _calculateCumulatedBalance(_user, redirectedBalance) - redirectedBalance;
-        }
+        // Accrue the user's interest
+        return _calculateCumulatedBalance(_user, currentPrincipalBalance);
     }
 
     //////////////////////////////////
@@ -300,44 +310,6 @@ contract AToken is ERC20 {
     }
 
     /**
-     * @dev updates the redirected balance of the user. If the user is not redirecting his
-     * interest, nothing is executed.
-     * @param _user the address of the user for which the interest is being accumulated
-     * @param _balanceToAdd the amount to add to the redirected balance
-     * @param _balanceToRemove the amount to remove from the redirected balance
-     *
-     */
-    function _updateRedirectedBalanceOfRedirectionAddress(
-        address _user,
-        uint256 _balanceToAdd,
-        uint256 _balanceToRemove
-    ) internal {
-        address redirectionAddress = s_interestRedirectionAddresses[_user];
-        // If there isn't any redirection, nothing to be done
-        if (redirectionAddress == address(0)) {
-            return;
-        }
-
-        // Compound balances of the redirected address
-        (,, uint256 balanceIncrease, uint256 index) = _cumulateBalance(redirectionAddress);
-
-        // Updating the redirected balance
-        s_redirectedBalances[redirectionAddress] =
-            s_redirectedBalances[redirectionAddress] + _balanceToAdd - _balanceToRemove;
-
-        // If the interest of redirectionAddress is also being redirected, we need to update
-        // the redirected balance of the redirection target by adding the balance increase
-        address targetOfRedirectionAddress = s_interestRedirectionAddresses[redirectionAddress];
-
-        if (targetOfRedirectionAddress != address(0)) {
-            s_redirectedBalances[targetOfRedirectionAddress] =
-                s_redirectedBalances[targetOfRedirectionAddress] + balanceIncrease;
-        }
-
-        emit RedirectedBalanceUpdated(redirectionAddress, balanceIncrease, index, _balanceToAdd, _balanceToRemove);
-    }
-
-    /**
      * @dev calculate the interest accrued by _user on a specific balance
      * @param _user the address of the user for which the interest is being accumulated
      * @param _balance the balance on which the interest is calculated
@@ -351,26 +323,84 @@ contract AToken is ERC20 {
     }
 
     /**
-     * @dev function to reset the interest stream redirection and the user index, if the
-     * user has no balance left.
+     * @dev resets the user's normalized-income index when they have no balance left.
      * @param _user the address of the user
-     * @return true if the user index has also been reset, false otherwise. useful to emit the proper user index value
+     * @return true when the user index has been reset, which is used to emit the proper index value.
      *
      */
     function _resetDataOnZeroBalance(address _user) internal returns (bool) {
-        // If the user has 0 principal balance, the interest stream redirection gets reset
-        s_interestRedirectionAddresses[_user] = address(0);
+        s_userIndexes[_user] = 0;
+        return true;
+    }
 
-        // Emits a InterestStreamRedirected event to notify that the redirection has been reset
-        emit InterestStreamRedirected(_user, address(0), 0, 0, 0);
-
-        // If the redirected balance is also 0, we clear up the user index
-        if (s_redirectedBalances[_user] == 0) {
-            s_userIndexes[_user] = 0;
-            return true;
-        } else {
-            return false;
+    /**
+     * @dev executes the transfer of aTokens, invoked by both _update() and
+     *      transferOnLiquidation()
+     * @param _from the address from which transfer the aTokens
+     * @param _to the destination address
+     * @param _value the amount to transfer
+     *
+     */
+    function _executeTransfer(address _from, address _to, uint256 _value) internal {
+        if (_value == 0) {
+            revert AToken__AmountMustBeGreaterThanZero();
         }
+
+        // Cumulate the balance of the sender:
+        // 1. Reads the stored principal aToken balance.
+        // 2. Calculates interest accrued since the saved liquidity index
+        // 3. Mints the interest as aTokens
+        // 4. Updates the saved index to the current reserve normalized income index
+        (, uint256 fromBalance, uint256 fromBalanceIncrease, uint256 fromIndex) = _cumulateBalance(_from);
+
+        // Cumulate the balance of the receiver
+        (,, uint256 toBalanceIncrease, uint256 toIndex) = _cumulateBalance(_to);
+
+        // Performs the ERC20-transfer
+        super._update(_from, _to, _value);
+
+        // Creates a flag used only to report the correct index in the custom event.
+        bool fromIndexReset = false;
+
+        // resets the sender’s stored accounting data if remaining balance is zero
+        if (fromBalance - _value == 0) {
+            fromIndexReset = _resetDataOnZeroBalance(_from);
+        }
+
+        emit BalanceTransfer(
+            _from, _to, _value, fromBalanceIncrease, toBalanceIncrease, fromIndexReset ? 0 : fromIndex, toIndex
+        );
+    }
+
+    /**
+     * @dev Overrides the ERC20 balance-update hook to apply aToken-specific
+     * transfer accounting and collateral-safety validation.
+     *
+     * Minting and burning are delegated directly to the parent ERC20
+     * implementation. This includes interest minted while balances are
+     * accumulated by {_cumulateBalance}.
+     *
+     * For regular transfers, verifies that reducing `from`'s aToken balance does
+     * not violate the lending pool's collateral requirements, then realizes
+     * accrued interest for both accounts and transfers the tokens.
+     *
+     * @param _from The address sending tokens. The zero address indicates minting.
+     * @param _to The address receiving tokens. The zero address indicates burning.
+     * @param _value The amount of aTokens to mint, burn, or transfer.
+     */
+    function _update(address _from, address _to, uint256 _value) internal override {
+        // Preserve ordinary ERC-20 mint/burn behavior.
+        if (_from == address(0) || _to == address(0)) {
+            super._update(_from, _to, _value);
+            return;
+        }
+
+        // Normal user transfer only
+        if (!isTransferAllowed(_from, _value)) {
+            revert AToken__TransferNotAllowed();
+        }
+
+        _executeTransfer(_from, _to, _value);
     }
 
     /////////////////////////////////

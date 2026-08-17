@@ -343,6 +343,71 @@ contract LendingPoolCore {
     }
 
     /**
+     * @dev updates the state of the core as a consequence of a liquidation action.
+     * @param _principalReserve the address of the principal reserve that is being repaid
+     * @param _collateralReserve the address of the collateral reserve that is being liquidated
+     * @param _user the address of the borrower
+     * @param _amountToLiquidate the amount being repaid by the liquidator
+     * @param _collateralToLiquidate the amount of collateral being liquidated
+     * @param _feeLiquidated the amount of origination fee being liquidated
+     * @param _liquidatedCollateralForFee the amount of collateral equivalent to the origination fee + bonus
+     * @param _balanceIncrease the accrued interest on the borrowed amount
+     * @param _liquidatorReceivesAToken true if the liquidator will receive aTokens, false otherwise
+     *
+     */
+    function updateStateOnLiquidation(
+        address _principalReserve,
+        address _collateralReserve,
+        address _user,
+        uint256 _amountToLiquidate,
+        uint256 _collateralToLiquidate,
+        uint256 _feeLiquidated,
+        uint256 _liquidatedCollateralForFee,
+        uint256 _balanceIncrease,
+        bool _liquidatorReceivesAToken
+    ) external onlyLendingPool {
+        // Update the reserve of the asset being repaid (the asset the borrower borrowed)
+        _updatePrincipalReserveStateOnLiquidation(_principalReserve, _user, _amountToLiquidate, _balanceIncrease);
+
+        // Update the collateral reserve's cumulative interest indexes.
+        _updateCollateralReserveStateOnLiquidation(_collateralReserve);
+
+        // Update the borrower's record for the borrowed asset
+        _updateUserStateOnLiquidation(_principalReserve, _user, _amountToLiquidate, _feeLiquidated, _balanceIncrease);
+
+        // Recompute the principal reserve’s liquidity, stable-borrow, and variable-borrow rates.
+        _updateReserveInterestRatesAndTimestamp(_principalReserve, _amountToLiquidate, 0);
+
+        if (!_liquidatorReceivesAToken) {
+            // When the liquidator receives underlying collateral (_liquidatorReceivesAToken == false), it leaves the pool;
+            // recompute the collateral reserve’s interest rates.
+            _updateReserveInterestRatesAndTimestamp(
+                _collateralReserve, 0, _collateralToLiquidate + _liquidatedCollateralForFee
+            );
+        }
+    }
+
+    /**
+     * @dev transfers the fees to the fees collection address in the case of liquidation
+     * @param _token the address of the token being transferred
+     * @param _amount the amount being transferred
+     * @param _destination the fee receiver address
+     *
+     */
+    function liquidateFee(address _token, uint256 _amount, address payable _destination) external onlyLendingPool {
+        if (_token != EthAddressLib.ethAddress()) {
+            // ERC20 transfer
+            IERC20(_token).safeTransfer(_destination, _amount);
+        } else {
+            // ETH transfer
+            (bool success,) = _destination.call{value: _amount}("");
+            if (!success) {
+                revert LendingPoolCore__EthTransferFailed(_destination, _amount);
+            }
+        }
+    }
+
+    /**
      * @dev updates the address of the interest rate strategy contract
      * @param _reserve the address of the reserve
      * @param _rateStrategyAddress the address of the interest rate strategy contract
@@ -852,7 +917,7 @@ contract LendingPoolCore {
         CoreLibrary.InterestRateMode borrowRateMode = getUserCurrentBorrowRateMode(_reserve, _user);
 
         // Updates the reserve’s cumulative interest indexes, bringing the pool accounting up to the current moment.
-        s_reserves[_reserve].updateCumulativeIndexes();
+        reserve.updateCumulativeIndexes();
 
         // Updates total borrowed amounts according to the user's rate mode
         if (borrowRateMode == CoreLibrary.InterestRateMode.STABLE) {
@@ -915,6 +980,102 @@ contract LendingPoolCore {
         user.originationFee = user.originationFee - _originationFeeRepaid;
 
         //Records the current block time as the user's last loan-state update
+        user.lastUpdateTimestamp = uint40(block.timestamp);
+    }
+
+    /**
+     * @dev updates the state of the principal reserve as a consequence of a liquidation action.
+     * @param _principalReserve the address of the principal reserve that is being repaid
+     * @param _user the address of the borrower
+     * @param _amountToLiquidate the amount being repaid by the liquidator
+     * @param _balanceIncrease the accrued interest on the borrowed amount
+     *
+     */
+    function _updatePrincipalReserveStateOnLiquidation(
+        address _principalReserve,
+        address _user,
+        uint256 _amountToLiquidate,
+        uint256 _balanceIncrease
+    ) internal {
+        // Reads the principal's reserve data
+        CoreLibrary.ReserveData storage reserve = s_reserves[_principalReserve];
+
+        // Reads the user's data for the principal's reserve
+        CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_principalReserve];
+
+        // Updates the reserve’s liquidity and variable-borrow cumulative indexes up to the current moment.
+        reserve.updateCumulativeIndexes();
+
+        // Determines whether this borrower’s debt is currently stable-rate or variable-rate.
+        CoreLibrary.InterestRateMode borrowRateMode = getUserCurrentBorrowRateMode(_principalReserve, _user);
+
+        if (borrowRateMode == CoreLibrary.InterestRateMode.STABLE) {
+            // The borrower has STABLE rate debt
+
+            // Increase the total borrows (totalBorrowsStable) by the compounded interest (_balanceIncrease)
+            reserve.increaseTotalBorrowsStableAndUpdateAverageRate(_balanceIncrease, user.stableBorrowRate);
+
+            // Decrease the total borrows (totalBorrowsStable) by the  amount to liquidate (_amountToLiquidate)
+            reserve.decreaseTotalBorrowsStableAndUpdateAverageRate(_amountToLiquidate, user.stableBorrowRate);
+
+            // Both operations recompute the reserve’s weighted-average stable borrow rate.
+        } else {
+            // The borrower has VARIABLE rate debt
+
+            // Adds accrued interest (_balanceIncrease) to totalBorrowsVariable
+            reserve.increaseTotalBorrowsVariable(_balanceIncrease);
+
+            // Subtracts the liquidation repayment (_amountToLiquidate) from totalBorrowsVariable
+            reserve.decreaseTotalBorrowsVariable(_amountToLiquidate);
+        }
+    }
+
+    /**
+     * @dev updates the state of the collateral reserve as a consequence of a liquidation action.
+     * @param _collateralReserve the address of the collateral reserve that is being liquidated
+     *
+     */
+    function _updateCollateralReserveStateOnLiquidation(address _collateralReserve) internal {
+        // Updates the reserve’s liquidity and variable-borrow cumulative indexes up to the current moment.
+        s_reserves[_collateralReserve].updateCumulativeIndexes();
+    }
+
+    /**
+     * @dev updates the state of the user being liquidated as a consequence of a liquidation action.
+     * @param _reserve the address of the principal reserve that is being repaid
+     * @param _user the address of the borrower
+     * @param _amountToLiquidate the amount being repaid by the liquidator
+     * @param _feeLiquidated the amount of origination fee being liquidated
+     * @param _balanceIncrease the accrued interest on the borrowed amount
+     *
+     */
+    function _updateUserStateOnLiquidation(
+        address _reserve,
+        address _user,
+        uint256 _amountToLiquidate,
+        uint256 _feeLiquidated,
+        uint256 _balanceIncrease
+    ) internal {
+        // Retrieves the borrower’s per-reserve record
+        CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
+
+        // Retrieves the reserve-wide accounting record
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+
+        // new borrower debt = old borrower debt + accrued interest − liquidation repayment
+        user.principalBorrowBalance = user.principalBorrowBalance + _balanceIncrease - _amountToLiquidate;
+
+        // For a variable-rate loan, records the reserve’s current cumulative variable-borrow index as the borrower’s new checkpoint.
+        if (getUserCurrentBorrowRateMode(_reserve, _user) == CoreLibrary.InterestRateMode.VARIABLE) {
+            user.lastVariableBorrowCumulativeIndex = reserve.lastVariableBorrowCumulativeIndex;
+        }
+
+        // If liquidation also settles an origination fee, reduces the borrower’s outstanding fee by that amount.
+        if (_feeLiquidated > 0) {
+            user.originationFee -= _feeLiquidated;
+        }
+
+        // Stores the time of this accounting update.
         user.lastUpdateTimestamp = uint40(block.timestamp);
     }
 
@@ -1398,5 +1559,16 @@ contract LendingPoolCore {
     function getUserLastUpdate(address _reserve, address _user) external view returns (uint256) {
         CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
         return user.lastUpdateTimestamp;
+    }
+
+    /**
+     * @dev gets the reserve liquidation bonus
+     * @param _reserve the reserve address
+     * @return the reserve liquidation bonus
+     *
+     */
+    function getReserveLiquidationBonus(address _reserve) external view returns (uint256) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        return reserve.liquidationBonus;
     }
 }

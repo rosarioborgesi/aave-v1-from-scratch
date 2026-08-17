@@ -15,6 +15,7 @@ import {LendingPoolAddressesProvider} from "src/configuration/LendingPoolAddress
 import {WadRayMath} from "src/libraries/WadRayMath.sol";
 import {LendingPoolDataProvider} from "src/lendingpool/LendingPoolDataProvider.sol";
 import {LendingPoolParametersProvider} from "src/configuration/LendingPoolParametersProvider.sol";
+import {LendingPoolLiquidationManager} from "src/lendingpool/LendingPoolLiquidationManager.sol";
 import {CoreLibrary} from "src/libraries/CoreLibrary.sol";
 
 contract LendingPoolCoreHarness is LendingPoolCore {
@@ -54,6 +55,7 @@ contract LendingPoolIntegrationTest is Test {
 
     address public user = makeAddr("user");
     address public secondUser = makeAddr("secondUser");
+    address public liquidator = makeAddr("liquidator");
     address public configurator = makeAddr("configurator");
     address public feeCollector = makeAddr("feeCollector");
 
@@ -84,6 +86,7 @@ contract LendingPoolIntegrationTest is Test {
 
         pool = new LendingPool(address(addressesProvider));
         addressesProvider.setLendingPool(address(pool));
+        addressesProvider.setLendingPoolLiquidationManager(address(new LendingPoolLiquidationManager()));
 
         addressesProvider.setLendingPoolConfigurator(configurator);
 
@@ -110,10 +113,13 @@ contract LendingPoolIntegrationTest is Test {
         // - usageAsCollateralEnabled = true: DAI deposits are automatically usable as collateral.
         core.setReserveConfiguration(address(dai), 75, 80, true);
         vm.prank(configurator);
+        core.setReserveLiquidationBonus(address(dai), 105);
+        vm.prank(configurator);
+
         // WETH is the borrowable asset:
         // - needs borrowing enabled
-        // - it doesn't need collateral parameters (core.setReserveConfiguration) unless a test deposits 
-        //   WETH and uses that deposit as a collateral   
+        // - it doesn't need collateral parameters (core.setReserveConfiguration) unless a test deposits
+        //   WETH and uses that deposit as a collateral
         core.enableBorrowingOnReserve(address(weth), true);
 
         // 1 ETH = 2,000 DAI, so 1 DAI = 0.0005 ETH.
@@ -1074,7 +1080,7 @@ contract LendingPoolIntegrationTest is Test {
         uint256 debtPayment = 0.005 ether;
         uint256 variableBorrowRate = 0.1e27;
 
-        // Set the variable borrow rate to 10% annually 
+        // Set the variable borrow rate to 10% annually
         interestRateStrategy.setRates(0, 0, variableBorrowRate);
 
         // User deposits 100 DAI as collateral
@@ -1093,19 +1099,19 @@ contract LendingPoolIntegrationTest is Test {
 
         // User borrows 0.02 WETH, variable-rate, creating:
         //    - 0.02 WETH debt
-        //    - 0.00005 WETH origination fee 
+        //    - 0.00005 WETH origination fee
         vm.prank(user);
         pool.borrow(address(weth), borrowAmount, uint256(CoreLibrary.InterestRateMode.VARIABLE), 0);
 
         // Advance one year. The current debt is now greater than the original principal because variable interest accrued
         vm.warp(block.timestamp + 365 days);
 
-        // compoundedDebt: principal plus accrued interest 
+        // compoundedDebt: principal plus accrued interest
         //              = 0.02 WETH x (1 + 10% / 31,536,000) ^ 31,536,000
         //              = 0.022103418358008479 WETH
         //
         // balanceIncrease: the accrued-interest component
-        //              = 0.022103418358008479 WETH - 0.02 WETH = 0.002103418358008479 WETH        
+        //              = 0.022103418358008479 WETH - 0.02 WETH = 0.002103418358008479 WETH
         (uint256 principalBefore, uint256 compoundedDebt, uint256 balanceIncrease) =
             core.getUserBorrowBalances(address(weth), user);
         assertGt(compoundedDebt, principalBefore);
@@ -1118,7 +1124,7 @@ contract LendingPoolIntegrationTest is Test {
         weth.approve(address(core), payment);
         vm.expectEmit(true, true, true, true, address(pool));
         emit LendingPool.Repay(address(weth), user, user, debtPayment, borrowFee, balanceIncrease, block.timestamp);
-        // Repay borrowFee + 0.005 WETH. Repayment applies the fee first, then applies the remaining 
+        // Repay borrowFee + 0.005 WETH. Repayment applies the fee first, then applies the remaining
         // 0.005 WETH to debt
         pool.repay(address(weth), payment, payable(user));
         vm.stopPrank();
@@ -1136,7 +1142,8 @@ contract LendingPoolIntegrationTest is Test {
 
         // The user remaing in VARIABLE mode, proving this was not treated as a full loan closure
         assertEq(
-            uint256(core.getUserCurrentBorrowRateMode(address(weth), user)), uint256(CoreLibrary.InterestRateMode.VARIABLE)
+            uint256(core.getUserCurrentBorrowRateMode(address(weth), user)),
+            uint256(CoreLibrary.InterestRateMode.VARIABLE)
         );
 
         // Core liquidity rises only by 0.005 WETH
@@ -1460,5 +1467,351 @@ contract LendingPoolIntegrationTest is Test {
         (, uint256 debtAfter,) = core.getUserBorrowBalances(address(weth), user);
         // Confirms the user’s compounded borrow balance is zero
         assertEq(debtAfter, 0);
+    }
+
+    //////////////////////////////////////
+    //           liquidationCall        //
+    //////////////////////////////////////
+
+    // Verifies a liquidation with three properties:
+    //   1. The liquidator cannot repay more than the 50% close factor.
+    //   2. The liquidator receives the collateral as underlying DAI (receiveAToken = false).
+    //   3. The borrower’s origination fee is also collected from remaining collateral.
+    function testLiquidationCapsRepaymentAndSendsUnderlyingCollateral() external {
+        // User deposits 100 DAI and in exchange receives 100 aDAI
+        vm.startPrank(user);
+        dai.approve(address(core), 100 ether);
+        pool.deposit(address(dai), 100 ether, 0);
+        vm.stopPrank();
+
+        // Second user deposits 1 WETH and in exchange receives 1 aWETH
+        weth.mint(secondUser, 1 ether);
+        vm.startPrank(secondUser);
+        weth.approve(address(core), 1 ether);
+        pool.deposit(address(weth), 1 ether, 0);
+        vm.stopPrank();
+
+        // The borrower (user) takes a 0.02 WETH variable-rate loan.
+        // The protocol also records a 0.25% origination fee
+        uint56 borrowAmount = 0.02 ether;
+        vm.prank(user);
+        pool.borrow(address(weth), borrowAmount, uint256(CoreLibrary.InterestRateMode.VARIABLE), 0);
+
+        // Initially DAI is priced at: 1 DAI = 0.0005 ETH
+        // So the borrower's collateral value is: 100 DAI x 0.0005 ETH = 0.05 ETH
+        // DAI has an 80% liquidation threshold, so it supports debt up to:
+        //      0.05 ETH x 80% = 0.04 ETH
+        // That is initially enough for the 0.02 WETH loan
+
+        uint256 shockedDaiPrice = 0.00025 ether;
+        priceOracle.setAssetPrice(address(dai), shockedDaiPrice);
+        weth.mint(liquidator, borrowAmount);
+        vm.prank(liquidator);
+        weth.approve(address(core), borrowAmount);
+
+        // Now DAI’s oracle price drops from 0.0005 ETH to 0.00025 ETH
+        // Now the collateral is worth:
+        // 100 DAI x 0.00025 ETH = 0.025 ETH
+        // At the 80% threshold, it only supports:
+        //      0.025 ETH x 80% = 0.02
+
+        // But the borrower owes the 0.02 WETH debt plus the 0.00005 WETH origination fee.
+        // Therefore, the position is below the liquidation threshold.
+
+        uint256 expectedRepayment = borrowAmount / 2;
+        uint256 expectedCollateral = 42 ether;
+        uint256 expectedFeeCollateral = 0.21 ether;
+
+        uint256 coreDaiBefore = dai.balanceOf(address(core));
+        uint256 liquidatorDaiBefore = dai.balanceOf(liquidator);
+        uint256 liquidatorWethBefore = weth.balanceOf(liquidator);
+        uint256 feeCollectorDaiBefore = dai.balanceOf(feeCollector);
+
+        vm.prank(liquidator);
+        pool.liquidationCall(address(dai), address(weth), user, borrowAmount, false);
+        // The liquidation call requests the full debt (0.02 WETH)
+        // But the liquidation manager caps principal repayment to 50%:
+        // actualAmountToLiquidate = min(purchaseAmount, debt * 50 / 100);
+        // So only 0.01 WETH is repaid
+
+        // The collateral calculation is:
+        // repaid WETH value / DAI price x 105% liquidation bonus =
+        //     = 0.01 / 0.00025 × 1.05 = 42 DAI
+
+        // Liquidator spends 0.01 WETH
+        assertEq(weth.balanceOf(liquidator), liquidatorWethBefore - expectedRepayment);
+
+        // Liquidator receives 42 DAI directly, because receiveAToken = false
+        assertEq(dai.balanceOf(liquidator), liquidatorDaiBefore + expectedCollateral);
+
+        // The original borrow incurred a 0.25% fee: 0.02 x0.25% = 0.00005 WETH
+        // It is liquidated from the collateral still left after the 42 DAI payment
+        //    0.00005 / 0.00025 x 1.05 = 0.21 DAI
+        // So the core's DAI balance decreases by 42 + 0.21
+        assertEq(dai.balanceOf(address(core)), coreDaiBefore - expectedCollateral - expectedFeeCollateral);
+        // The borrower's aDAI balance becomes 100 -42 - 0.21 = 57.79 DAI
+        assertEq(aDai.balanceOf(user), 100 ether - expectedCollateral - expectedFeeCollateral);
+
+        // Reserve-wide variable borrows become 0.01 WETH
+        assertEq(core.getReserveTotalBorrowsVariable(address(weth)), expectedRepayment);
+
+        (, uint256 borrowerDebt,) = core.getUserBorrowBalances(address(weth), user);
+        // Borrower’s variable debt falls from 0.02 to 0.01 WETH
+        assertEq(borrowerDebt, expectedRepayment);
+
+        // The fee collateral (0.21 DAI) is transferred to the protocol fee collector.
+        assertEq(dai.balanceOf(feeCollector), feeCollectorDaiBefore + expectedFeeCollateral);
+    }
+
+    // Verifies a liquidation with three properties:
+    //   1. The liquidator cannot repay more than the 50% close factor.
+    //   2. The liquidator receives collateral as aDAI (receiveAToken = true),
+    //      rather than receiving underlying DAI.
+    //   3. The borrower’s origination fee is still collected as underlying DAI
+    //      from the remaining collateral.
+    function testLiquidationCapsRepaymentAndTransfersATokenCollateral() external {
+        vm.startPrank(user);
+        dai.approve(address(core), 100 ether);
+        pool.deposit(address(dai), 100 ether, 0);
+        vm.stopPrank();
+
+        weth.mint(secondUser, 1 ether);
+        vm.startPrank(secondUser);
+        weth.approve(address(core), 1 ether);
+        pool.deposit(address(weth), 1 ether, 0);
+        vm.stopPrank();
+
+        uint256 borrowAmount = 0.02 ether;
+        vm.prank(user);
+        pool.borrow(address(weth), borrowAmount, uint256(CoreLibrary.InterestRateMode.VARIABLE), 0);
+
+        uint256 shockedDaiPrice = 0.00025 ether;
+        priceOracle.setAssetPrice(address(dai), shockedDaiPrice);
+        weth.mint(liquidator, borrowAmount);
+        vm.prank(liquidator);
+        weth.approve(address(core), borrowAmount);
+
+        // Setup:
+        //   - User deposits 100 DAI
+        //   - Second user deposits 1 WETH
+        //   - User borrows 0.02 WETH at a variable rate
+        //   - DAI’s oracle price drops from 0.0005 ETH to 0.00025 ETH
+        //   - The user is now liquidatable: their 100 DAI collateral is worth 0.025 ETH,
+        //      whose 80% liquidation threshold is 0.02 ETH;
+        //      debt plus the 0.00005 WETH origination fee exceeds that.
+
+        uint256 expectedRepayment = borrowAmount / 2;
+        uint256 expectedCollateral = 42 ether;
+        uint256 expectedFeeCollateral = 0.21 ether;
+
+        uint256 coreDaiBefore = dai.balanceOf(address(core));
+        uint256 liquidatorADaiBefore = aDai.balanceOf(liquidator);
+        uint256 liquidatorDaiBefore = dai.balanceOf(liquidator);
+        uint256 liquidatorWethBefore = weth.balanceOf(liquidator);
+        uint256 feeCollectorDaiBefore = dai.balanceOf(feeCollector);
+
+        vm.prank(liquidator);
+        pool.liquidationCall(address(dai), address(weth), user, borrowAmount, true);
+        // The liquidation call requests the full debt (0.02 WETH), but the
+        // liquidation manager caps principal repayment at 50%, so only 0.01 WETH is repaid.
+
+        // The collateral calculation is:
+        // repaid WETH value / DAI price x 105% liquidation bonus =
+        //     = 0.01 / 0.00025 × 1.05 = 42 DAI
+
+        // The liquidator pays 0.01 WETH,
+        assertEq(weth.balanceOf(liquidator), liquidatorWethBefore - expectedRepayment);
+        // The liquidator gets no underlying DAI.
+        assertEq(dai.balanceOf(liquidator), liquidatorDaiBefore); // unchanged
+
+        // The liquidator receives 42 aDAI from the protocol because receiveAToken = true
+        assertEq(aDai.balanceOf(liquidator), liquidatorADaiBefore + expectedCollateral);
+
+        // The only DAI transfer is the 0.21 DAI origination-fee settlement.
+        // 0.00005 WETH / 0.00025 ETH per DAI × 1.05 = 0.2 DAI × 1.05 = 0.21 DAI
+        assertEq(dai.balanceOf(address(core)), coreDaiBefore - expectedFeeCollateral);
+        assertEq(aDai.balanceOf(user), 100 ether - expectedCollateral - expectedFeeCollateral);
+        assertEq(dai.balanceOf(feeCollector), feeCollectorDaiBefore + expectedFeeCollateral);
+
+        (, uint256 borrowerDebt,) = core.getUserBorrowBalances(address(weth), user);
+        // The borrower’s variable debt falls from 0.02 to 0.01 WETH.
+        assertEq(borrowerDebt, expectedRepayment);
+    }
+
+    // This test checks that a liquidator never pays back more of a borrower’s loan
+    // than the borrower’s collateral is worth.
+    function testLiquidationCapsRepaymentToInsufficientCollateral() external {
+        vm.startPrank(user);
+        dai.approve(address(core), 100 ether);
+        pool.deposit(address(dai), 100 ether, 0);
+        vm.stopPrank();
+
+        weth.mint(secondUser, 1 ether);
+        vm.startPrank(secondUser);
+        weth.approve(address(core), 1 ether);
+        pool.deposit(address(weth), 1 ether, 0);
+        vm.stopPrank();
+
+        uint256 borrowAmount = 0.02 ether;
+        vm.prank(user);
+        pool.borrow(address(weth), borrowAmount, uint256(CoreLibrary.InterestRateMode.VARIABLE), 0);
+
+        uint256 shockedDaiPrice = 0.0001 ether;
+        priceOracle.setAssetPrice(address(dai), shockedDaiPrice);
+        weth.mint(liquidator, borrowAmount);
+        vm.prank(liquidator);
+        weth.approve(address(core), borrowAmount);
+
+        // User deposits 100 DAI.
+        // User borrows 0.02 WETH.
+        // DAI’s price is crashed to 0.0001 ETH per DAI, making the position liquidatable.
+
+        uint256 expectedRepayment = 9_523_809_523_809_523;
+
+        uint256 liquidatorWethBefore = weth.balanceOf(liquidator);
+        vm.prank(liquidator);
+        pool.liquidationCall(address(dai), address(weth), user, borrowAmount, false);
+
+        // The liquidator requests liquidation of the whole 0.02 WETH debt
+        // and elects to receive underlying DAI.
+
+        // Ordinarily, the 50% close factor would cap repayment at 0.01 WETH.
+        // With the 5% liquidation bonus, that would require seizing:
+        //      0.01 WETH / 0.0001 ETH-per-DAI × 1.05 = 105 DAI
+
+        // But the user has only 100 DAI.
+        // The liquidation manager therefore seizes all 100 DAI and reverses the formula
+        // to dermine the repayment that this collateral can support:
+        //      0.0001 ETH-per-DAI × 100 DAI / 1 ETH-per-WETH × 100 / 105
+        //        = 0.009523809523809523 WETH --> expectedRepayment
+
+        // The user’s aDAI balance is zero: all 100 DAI collateral was seized
+        assertEq(aDai.balanceOf(user), 0);
+
+        // The liquidator receives 100 DAI underlying collateral
+        assertEq(dai.balanceOf(liquidator), 100 ether);
+
+        // the liquidator pays only 0.009523809523809523 WETH,
+        // rather than the requested amount or the 0.01 WETH close-factor cap
+        assertEq(weth.balanceOf(liquidator), liquidatorWethBefore - expectedRepayment);
+        (, uint256 borrowerDebt,) = core.getUserBorrowBalances(address(weth), user);
+
+        // The borrower retains the unpaid debt: 0.02 - expectedRepayment
+        assertEq(borrowerDebt, borrowAmount - expectedRepayment);
+    }
+
+    modifier withLiquidatablePosition() {
+        vm.startPrank(user);
+        dai.approve(address(core), 100 ether);
+        pool.deposit(address(dai), 100 ether, 0);
+        vm.stopPrank();
+
+        weth.mint(secondUser, 1 ether);
+        vm.startPrank(secondUser);
+        weth.approve(address(core), 1 ether);
+        pool.deposit(address(weth), 1 ether, 0);
+        vm.stopPrank();
+
+        uint256 borrowAmount = 0.02 ether;
+        vm.prank(user);
+        pool.borrow(address(weth), borrowAmount, uint256(CoreLibrary.InterestRateMode.VARIABLE), 0);
+
+        uint256 shockedDaiPrice = 0.00025 ether;
+        priceOracle.setAssetPrice(address(dai), shockedDaiPrice);
+        weth.mint(liquidator, borrowAmount);
+        vm.prank(liquidator);
+        weth.approve(address(core), borrowAmount);
+
+        // User deposits 100 DAI.
+        // User borrows 0.02 WETH.
+        // DAI’s price is crashed from 0.0005 ETH to 0.00025 ETH per DAI, making the position liquidatable.
+        _;
+    }
+
+    function testLiquidationRevertsWhenPositionBecomesHealthyAgain() external withLiquidatablePosition {
+        // A restored price makes the existing position healthy.
+        priceOracle.setAssetPrice(address(dai), 0.0005 ether);
+        uint256 borrowAmount = 0.02 ether;
+
+        vm.prank(liquidator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                LendingPool.LendingPool__LiquidationFailed.selector, "Health factor is not below threshold"
+            )
+        );
+        pool.liquidationCall(address(dai), address(weth), user, borrowAmount, false);
+    }
+
+    function testLiquidationRevertsWhenSelectedInvalidCollateral() external withLiquidatablePosition {
+        // The liquidator asks to seize WETH collateral (first parameter liquidateCall)
+        // but the borrower deposited DAI, not WETH
+        uint256 borrowAmount = 0.02 ether;
+
+        vm.prank(liquidator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                LendingPool.LendingPool__LiquidationFailed.selector, "Invalid collateral to liquidate"
+            )
+        );
+        pool.liquidationCall(address(weth), address(weth), user, borrowAmount, false);
+    }
+
+    function testLiquidationRevertsWhenSelectedAssetWasNotBorrowed() external withLiquidatablePosition {
+        // This asks the liquidator to repay DAI debt (second parameter liquidateCall)
+        // but the borrower only borrowed WETH
+        uint256 borrowAmount = 0.02 ether;
+
+        vm.prank(liquidator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                LendingPool.LendingPool__LiquidationFailed.selector, "User did not borrow the specified currency"
+            )
+        );
+        pool.liquidationCall(address(dai), address(dai), user, borrowAmount, false);
+    }
+
+    function testLiquidationRevertsWhenCollaterailIsDisbaledGlobally() external withLiquidatablePosition {
+        // Disable DAI globally as collateral after the position is created.
+        uint256 borrowAmount = 0.02 ether;
+
+        core.setReserveConfiguration(address(dai), 75, 80, false);
+        vm.prank(liquidator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                LendingPool.LendingPool__LiquidationFailed.selector, "The collateral chosen cannot be lquidated"
+            )
+        );
+        pool.liquidationCall(address(dai), address(weth), user, borrowAmount, false);
+    }
+
+    function testLiquidationRevertsWhenUnderlyingCollateralLiquidityIsInsufficient() external withLiquidatablePosition {
+        //uint256 borrowAmount = _setupLiquidatableVariablePosition(0.00025 ether);
+        uint256 borrowAmount = 0.02 ether;
+
+        // The test makes DAI scarce in the pool
+        // secondUser deposited 1 WETH during setup.
+        // The test enables that WETH as collateral and enables DAI borrowing,
+        // allowing secondUser to borrow 99.79 DAI out of the 100 DAI reserve.
+        // Only about 0.21 DAI remains available as actual tokens in the pool.
+        core.setReserveConfiguration(address(weth), 75, 80, true);
+        vm.prank(configurator);
+        core.enableBorrowingOnReserve(address(dai), true);
+        vm.prank(secondUser);
+        pool.borrow(address(dai), 99.79 ether, uint256(CoreLibrary.InterestRateMode.VARIABLE), 0);
+
+        // Now the liquidator wants:
+        // - seize DAI collateral
+        // - repay the borrower’s WETH debt
+        // - the liquidator wants to be paid in underlying DAI, not aDAI
+
+        // since in the pool are only 0.21 DAI the liquidator can't be paid and it reverts
+        vm.prank(liquidator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                LendingPool.LendingPool__LiquidationFailed.selector,
+                "There isn't neough liquidity available to liquidate"
+            )
+        );
+        pool.liquidationCall(address(dai), address(weth), user, borrowAmount, false);
     }
 }

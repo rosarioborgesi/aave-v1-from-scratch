@@ -30,6 +30,7 @@ contract ReentrantRedeemReceiver {
         try i_pool.redeemUnderlying(i_reserve, payable(address(this)), 1, 0) {
             revert ReentrantRedeemReceiver__ReentrantCallSucceeded();
         } catch (bytes memory reason) {
+            // forge-lint: disable-next-line(unsafe-typecast)
             if (bytes4(reason) != ReentrancyGuard.ReentrancyGuardReentrantCall.selector) {
                 revert ReentrantRedeemReceiver__UnexpectedRevert(reason);
             }

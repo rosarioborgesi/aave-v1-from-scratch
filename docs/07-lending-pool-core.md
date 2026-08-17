@@ -2069,3 +2069,115 @@ This function moves the origination-fee portion of a repayment to the protocol's
 For an ERC20 reserve, no ETH may accompany the call. The core uses `safeTransferFrom(_user, _destination, _amount)`, so `_user` must have approved `LendingPoolCore` for the fee amount.
 
 For the ETH reserve, `msg.value` must be at least `_amount`, and the core sends exactly `_amount` ETH to `_destination`. Any value above `_amount` remains in the core, so callers should pass the exact fee amount. `LendingPool.repay()` does so in its normal fee-transfer path.
+
+# Liquidation State Update
+
+## `updateStateOnLiquidation`
+
+```solidity
+function updateStateOnLiquidation(
+    address _principalReserve,
+    address _collateralReserve,
+    address _user,
+    uint256 _amountToLiquidate,
+    uint256 _collateralToLiquidate,
+    uint256 _feeLiquidated,
+    uint256 _liquidatedCollateralForFee,
+    uint256 _balanceIncrease,
+    bool _liquidatorReceivesAToken
+) external onlyLendingPool
+```
+
+This is the core accounting entry point after `LendingPool` has validated a liquidation and calculated its amounts. `_principalReserve` is the debt asset being repaid, while `_collateralReserve` is the asset seized from the borrower.
+
+It performs accounting only: the liquidation manager subsequently collects the liquidator's repayment, moves or burns the borrower's collateral aTokens, and transfers any protocol fee. As with other core state-update functions, `onlyLendingPool` protects the entry point, but the core trusts the amounts supplied by that caller.
+
+The updates occur in this order:
+
+```text
+1. Checkpoint the debt reserve and update its aggregate borrow total.
+2. Checkpoint the collateral reserve's indexes.
+3. Update the borrower's debt, fee, variable-rate checkpoint, and timestamp.
+4. Reprice the debt reserve for the repayment entering its liquidity.
+5. If underlying collateral leaves the pool, reprice the collateral reserve for that outflow.
+```
+
+`_amountToLiquidate` repays debt and therefore becomes liquidity added to the principal reserve. `_feeLiquidated` is the portion of the borrower's origination fee settled by the liquidation, denominated in the principal asset. `_liquidatedCollateralForFee` is the separately calculated amount of collateral taken to pay that fee, including its liquidation bonus.
+
+When `_liquidatorReceivesAToken` is true, collateral aTokens move from the borrower to the liquidator and the underlying collateral stays in the core. The collateral reserve's available underlying liquidity does not change, so its interest rates are not recomputed. When it is false, the liquidator receives underlying collateral; both `_collateralToLiquidate` and `_liquidatedCollateralForFee` leave the pool and are passed as `liquidityTaken` to the rate update.
+
+## `_updatePrincipalReserveStateOnLiquidation`
+
+```solidity
+function _updatePrincipalReserveStateOnLiquidation(
+    address _principalReserve,
+    address _user,
+    uint256 _amountToLiquidate,
+    uint256 _balanceIncrease
+) internal
+```
+
+This helper keeps reserve-wide debt totals consistent with the liquidated borrower's position. It first calls `updateCumulativeIndexes()` so that supplier and variable-borrow index growth is recorded using the rates that applied before liquidation changes the reserve.
+
+It then identifies the borrower's rate mode and materializes their accrued interest in the corresponding aggregate before subtracting the debt repayment:
+
+```text
+new aggregate debt = old aggregate debt + balanceIncrease - amountToLiquidate
+```
+
+For stable debt, the helper changes `totalBorrowsStable` through the weighted-average stable-rate helpers, using the borrower's `stableBorrowRate`. For variable debt, it changes `totalBorrowsVariable`; variable debt uses the reserve-wide cumulative index rather than a weighted average rate.
+
+## `_updateCollateralReserveStateOnLiquidation`
+
+```solidity
+function _updateCollateralReserveStateOnLiquidation(
+    address _collateralReserve
+) internal
+```
+
+This helper checkpoints the collateral reserve's cumulative indexes immediately before the liquidation changes who owns the collateral or removes it from the pool:
+
+```solidity
+s_reserves[_collateralReserve].updateCumulativeIndexes();
+```
+
+The checkpoint records deposit interest, and any variable-borrow interest in the collateral reserve, using the rates in effect before the liquidation. It does not directly change the reserve's debt totals or liquidity. Those changes are handled separately: transferring aTokens changes ownership without moving underlying liquidity, while an underlying-collateral liquidation triggers the later interest-rate update with the collateral outflow.
+
+## `_updateUserStateOnLiquidation`
+
+```solidity
+function _updateUserStateOnLiquidation(
+    address _reserve,
+    address _user,
+    uint256 _amountToLiquidate,
+    uint256 _feeLiquidated,
+    uint256 _balanceIncrease
+) internal
+```
+
+This helper writes the liquidated borrower's per-reserve debt state. It materializes the interest accrued since the last update and subtracts the debt repayment:
+
+```text
+new principalBorrowBalance =
+    old principalBorrowBalance
+    + balanceIncrease
+    - amountToLiquidate
+```
+
+For a variable-rate loan, it saves the reserve's current `lastVariableBorrowCumulativeIndex` as the new user checkpoint. Any debt remaining after liquidation will therefore accrue from this index onward. For a stable-rate loan, the user's stable rate remains the rate attached to the remaining stable debt.
+
+If `_feeLiquidated` is nonzero, the helper also reduces `user.originationFee` by that amount. It finally sets `lastUpdateTimestamp` to `block.timestamp` so future interest calculations begin from the liquidation update.
+
+## `liquidateFee`
+
+```solidity
+function liquidateFee(
+    address _token,
+    uint256 _amount,
+    address payable _destination
+) external onlyLendingPool
+```
+
+This function sends collateral reserved for a liquidated origination fee from `LendingPoolCore` to the protocol fee collector. Before it is called, the liquidation manager burns the borrower's aTokens for the same collateral amount, keeping the aToken supply aligned with the underlying assets that leave the pool.
+
+For ERC20 collateral, the core uses `safeTransfer(_destination, _amount)`. For ETH collateral, it sends `_amount` with a low-level call and reverts with `LendingPoolCore__EthTransferFailed` if the transfer fails. The function transfers funds only; the borrower’s outstanding fee was already reduced by `_updateUserStateOnLiquidation()`.

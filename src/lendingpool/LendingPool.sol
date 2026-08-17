@@ -32,6 +32,7 @@ import {IFeeProvider} from "src/interfaces/IFeeProvider.sol";
 import {LendingPoolParametersProvider} from "src/configuration/LendingPoolParametersProvider.sol";
 import {CoreLibrary} from "src/libraries/CoreLibrary.sol";
 import {EthAddressLib} from "src/libraries/EthAddressLib.sol";
+import {ILiquidationManager} from "src/interfaces/ILiquidationManager.sol";
 
 /**
  * @title LendingPool contract
@@ -59,6 +60,8 @@ contract LendingPool is ReentrancyGuard {
     error LendingPool__NoBorrowPending();
     error LendingPool__ExplicitAmountRequiredForRepayOnBehalf();
     error LendingPool__InvalidETHRepaymentAmount();
+    error LendingPool__LiquidationCallFailed();
+    error LendingPool__LiquidationFailed(string reason);
 
     //////////////////////////////////
     //      Type declarations       //
@@ -102,11 +105,11 @@ contract LendingPool is ReentrancyGuard {
     ////////////////////////////////
     //      State Variables       //
     ////////////////////////////////
-    LendingPoolCore private immutable i_core;
-    LendingPoolAddressesProvider private immutable i_addressesProvider;
-    LendingPoolDataProvider private immutable i_dataProvider;
-    IFeeProvider private immutable i_feeProvider;
-    LendingPoolParametersProvider private immutable i_parametersProvider;
+    LendingPoolAddressesProvider private s_addressesProvider;
+    LendingPoolCore private s_core;
+    LendingPoolDataProvider private s_dataProvider;
+    LendingPoolParametersProvider private s_parametersProvider;
+    IFeeProvider private s_feeProvider;
 
     ////////////////////////////////
     //           Events           //
@@ -191,14 +194,14 @@ contract LendingPool is ReentrancyGuard {
     }
 
     modifier onlyActiveReserve(address _reserve) {
-        if (!i_core.getReserveIsActive(_reserve)) {
+        if (!s_core.getReserveIsActive(_reserve)) {
             revert LendingPool__ReserveIsNotActive();
         }
         _;
     }
 
     modifier onlyUnfreezedReserve(address _reserve) {
-        if (i_core.getReserveIsFreezed(_reserve)) {
+        if (s_core.getReserveIsFreezed(_reserve)) {
             revert LendingPool__ReserveIsFrozen();
         }
         _;
@@ -211,7 +214,7 @@ contract LendingPool is ReentrancyGuard {
      *
      */
     modifier onlyOverlyingAToken(address _reserve) {
-        if (msg.sender != i_core.getReserveATokenAddress(_reserve)) {
+        if (msg.sender != s_core.getReserveATokenAddress(_reserve)) {
             revert LendingPool__ATokenOnly();
         }
         _;
@@ -224,12 +227,12 @@ contract LendingPool is ReentrancyGuard {
         if (_addressesProvider == address(0)) {
             revert LendingPool__ZeroAddress();
         }
-        i_addressesProvider = LendingPoolAddressesProvider(_addressesProvider);
+        s_addressesProvider = LendingPoolAddressesProvider(_addressesProvider);
 
-        address coreAddress = i_addressesProvider.getLendingPoolCore();
-        address dataProviderAddress = i_addressesProvider.getLendingPoolDataProvider();
-        address feeProviderAddress = i_addressesProvider.getFeeProvider();
-        address parametersProviderAddress = i_addressesProvider.getLendingPoolParametersProvider();
+        address coreAddress = s_addressesProvider.getLendingPoolCore();
+        address dataProviderAddress = s_addressesProvider.getLendingPoolDataProvider();
+        address feeProviderAddress = s_addressesProvider.getFeeProvider();
+        address parametersProviderAddress = s_addressesProvider.getLendingPoolParametersProvider();
 
         if (
             coreAddress == address(0) || dataProviderAddress == address(0) || feeProviderAddress == address(0)
@@ -238,10 +241,10 @@ contract LendingPool is ReentrancyGuard {
             revert LendingPool__ZeroAddress();
         }
 
-        i_core = LendingPoolCore(coreAddress);
-        i_dataProvider = LendingPoolDataProvider(dataProviderAddress);
-        i_feeProvider = IFeeProvider(feeProviderAddress);
-        i_parametersProvider = LendingPoolParametersProvider(parametersProviderAddress);
+        s_core = LendingPoolCore(coreAddress);
+        s_dataProvider = LendingPoolDataProvider(dataProviderAddress);
+        s_feeProvider = IFeeProvider(feeProviderAddress);
+        s_parametersProvider = LendingPoolParametersProvider(parametersProviderAddress);
     }
 
     ////////////////////////////////
@@ -264,7 +267,7 @@ contract LendingPool is ReentrancyGuard {
         onlyAmountGreaterThanZero(_amount)
     {
         // Get the aToken contract associated with the underlying reserve
-        AToken aToken = AToken(i_core.getReserveATokenAddress(_reserve));
+        AToken aToken = AToken(s_core.getReserveATokenAddress(_reserve));
 
         // Check if this is the user's first deposit for this reserve
         bool isFirstDeposit = aToken.balanceOf(msg.sender) == 0;
@@ -273,13 +276,13 @@ contract LendingPool is ReentrancyGuard {
         // 1. updates cumulative indexes
         // 2. updates reserve interest rates after new liquidity enters
         // 3. enables the reserve as collateral if this is the user's first deposit
-        i_core.updateStateOnDeposit(_reserve, msg.sender, _amount, isFirstDeposit);
+        s_core.updateStateOnDeposit(_reserve, msg.sender, _amount, isFirstDeposit);
 
         // Minting AToken to user 1:1 with the specific exchange rate
         aToken.mintOnDeposit(msg.sender, _amount);
 
         // Transfer funds (ETH or ERC20) to the core contract
-        i_core.transferToReserve{value: msg.value}(_reserve, payable(msg.sender), _amount);
+        s_core.transferToReserve{value: msg.value}(_reserve, payable(msg.sender), _amount);
 
         emit Deposit(_reserve, msg.sender, _amount, _referralCode, block.timestamp);
     }
@@ -306,7 +309,7 @@ contract LendingPool is ReentrancyGuard {
     {
         // Check available liquidity,
         // if the user wants to redeem more liquidity then available revert
-        uint256 currentAvailableLiquidity = i_core.getReserveAvailableLiquidity(_reserve);
+        uint256 currentAvailableLiquidity = s_core.getReserveAvailableLiquidity(_reserve);
         if (currentAvailableLiquidity < _amount) {
             revert LendingPool__InsufficientLiquidityToRedeem();
         }
@@ -315,10 +318,10 @@ contract LendingPool is ReentrancyGuard {
         // 1. updates cumulative indexes
         // 2. updates reserve interest rates after liquidity leaves
         // 3. disables collateral usage if the user redeemed everything
-        i_core.updateStateOnRedeem(_reserve, _user, _amount, _aTokenBalanceAfterRedeem == 0);
+        s_core.updateStateOnRedeem(_reserve, _user, _amount, _aTokenBalanceAfterRedeem == 0);
 
         // Transfer underlying asset to the user
-        i_core.transferToUser(_reserve, _user, _amount);
+        s_core.transferToUser(_reserve, _user, _amount);
 
         emit RedeemUnderlying(_reserve, _user, _amount, block.timestamp);
     }
@@ -341,7 +344,7 @@ contract LendingPool is ReentrancyGuard {
         BorrowLocalVars memory vars;
 
         // Check that the reserve is enabled for borrowing
-        if (!i_core.isReserveBorrowingEnabled(_reserve)) {
+        if (!s_core.isReserveBorrowingEnabled(_reserve)) {
             revert LendingPool__ReserveNotEnabledForBorrowing();
         }
 
@@ -357,7 +360,7 @@ contract LendingPool is ReentrancyGuard {
         vars.rateMode = CoreLibrary.InterestRateMode(_interestRateMode);
 
         // Check that the amount is available in the reserve
-        vars.availableLiquidity = i_core.getReserveAvailableLiquidity(_reserve);
+        vars.availableLiquidity = s_core.getReserveAvailableLiquidity(_reserve);
 
         // A user cannot borrow more tokens than the reserve currently has available.
         if (vars.availableLiquidity < _amount) {
@@ -373,7 +376,7 @@ contract LendingPool is ReentrancyGuard {
             vars.currentLtv,
             vars.currentLiquidationThreshold,,
             vars.healthFactorBelowThreshold
-        ) = i_dataProvider.calculateUserGlobalData(msg.sender);
+        ) = s_dataProvider.calculateUserGlobalData(msg.sender);
 
         // Check that collateral is not zero
         if (vars.userCollateralBalanceETH == 0) {
@@ -386,14 +389,14 @@ contract LendingPool is ReentrancyGuard {
         }
 
         // Calculate the origination fee
-        vars.borrowFee = i_feeProvider.calculateLoanOriginationFee(msg.sender, _amount);
+        vars.borrowFee = s_feeProvider.calculateLoanOriginationFee(msg.sender, _amount);
         // If the calculated fee rounds down to zero, the requested borrow is considered too small
         if (vars.borrowFee == 0) {
             revert LendingPool__TooSmallAmountToBorrow();
         }
 
         // Calculate the required collateral
-        vars.amountOfCollateralNeededETH = i_dataProvider.calculateCollateralNeededInETH(
+        vars.amountOfCollateralNeededETH = s_dataProvider.calculateCollateralNeededInETH(
             _reserve, _amount, vars.borrowFee, vars.userBorrowBalanceETH, vars.userTotalFeesETH, vars.currentLtv
         );
 
@@ -415,7 +418,7 @@ contract LendingPool is ReentrancyGuard {
             // Verifies that:
             // - stable borrowing is enabled for the reserve
             // - the user is not borrowing the same asset they are using as collateral
-            if (!i_core.isUserAllowedToBorrowAtStable(_reserve, msg.sender, _amount)) {
+            if (!s_core.isUserAllowedToBorrowAtStable(_reserve, msg.sender, _amount)) {
                 revert LendingPool__UserCannotBorrowAmountAtStableRate();
             }
 
@@ -428,7 +431,7 @@ contract LendingPool is ReentrancyGuard {
             // available liquidity = 1,000 tokens
             // maximum percentage = 25%
             // maximum stable borrow = 250 tokens
-            uint256 maxLoanPercent = i_parametersProvider.getMaxStableRateBorrowSizePercent();
+            uint256 maxLoanPercent = s_parametersProvider.getMaxStableRateBorrowSizePercent();
             uint256 maxLoanSizeStable = vars.availableLiquidity * maxLoanPercent / 100;
 
             if (_amount > maxLoanSizeStable) {
@@ -439,11 +442,11 @@ contract LendingPool is ReentrancyGuard {
         // All conditions passed - borrow is accepted
         // Update the the accounting or protocol state on LendingPoolCore
         (vars.finalUserBorrowRate, vars.borrowBalanceIncrease) =
-            i_core.updateStateOnBorrow(_reserve, msg.sender, _amount, vars.borrowFee, vars.rateMode);
+            s_core.updateStateOnBorrow(_reserve, msg.sender, _amount, vars.borrowFee, vars.rateMode);
 
         // Transfer the borrowed asset.
         // LendingPoolCore sends the underlying ERC20 token or ETH to the borrower
-        i_core.transferToUser(_reserve, payable(msg.sender), _amount);
+        s_core.transferToUser(_reserve, payable(msg.sender), _amount);
 
         emit Borrow(
             _reserve,
@@ -482,10 +485,10 @@ contract LendingPool is ReentrancyGuard {
         // - compoundedBorrowbalance: total debt including accrued interest
         // - borrowBalanceIncrease: interest accrued since the last update
         (vars.principalBorrowBalance, vars.compoundedBorrowBalance, vars.borrowBalanceIncrease) =
-            i_core.getUserBorrowBalances(_reserve, _onBehalfOf);
+            s_core.getUserBorrowBalances(_reserve, _onBehalfOf);
 
         // Get the protocol fee still owed by the borrower.
-        vars.originationFee = i_core.getUserOriginationFee(_reserve, _onBehalfOf);
+        vars.originationFee = s_core.getUserOriginationFee(_reserve, _onBehalfOf);
 
         // ETH repayments use msg.value; ERC-20 repayments use transferFrom.
         vars.isETH = EthAddressLib.ethAddress() == _reserve;
@@ -520,11 +523,11 @@ contract LendingPool is ReentrancyGuard {
         // If the amount is not enough to cover the fee, no debt is repaid.
         if (vars.paybackAmount <= vars.originationFee) {
             // Reduce only the outstanding fee. The debt amount stays unchanged.
-            i_core.updateStateOnRepay(_reserve, _onBehalfOf, 0, vars.paybackAmount, vars.borrowBalanceIncrease, false);
+            s_core.updateStateOnRepay(_reserve, _onBehalfOf, 0, vars.paybackAmount, vars.borrowBalanceIncrease, false);
 
             // Send the paid fee to the protocol fee collector.
-            i_core.transferToFeeCollectionAddress{value: vars.isETH ? vars.paybackAmount : 0}(
-                _reserve, _onBehalfOf, vars.paybackAmount, i_addressesProvider.getTokenDistributor()
+            s_core.transferToFeeCollectionAddress{value: vars.isETH ? vars.paybackAmount : 0}(
+                _reserve, _onBehalfOf, vars.paybackAmount, s_addressesProvider.getTokenDistributor()
             );
 
             emit Repay(
@@ -540,7 +543,7 @@ contract LendingPool is ReentrancyGuard {
 
         // Update the borrower's debt, reserve borrow totals, and interest rates.
         // The final bool is true only when all compounded debt was repaid.
-        i_core.updateStateOnRepay(
+        s_core.updateStateOnRepay(
             _reserve,
             _onBehalfOf,
             vars.paybackAmountMinusFees,
@@ -551,15 +554,15 @@ contract LendingPool is ReentrancyGuard {
 
         // Send the paid fee to the protocol fee collector.
         if (vars.originationFee > 0) {
-            i_core.transferToFeeCollectionAddress{value: vars.isETH ? vars.originationFee : 0}(
-                _reserve, msg.sender, vars.originationFee, i_addressesProvider.getTokenDistributor()
+            s_core.transferToFeeCollectionAddress{value: vars.isETH ? vars.originationFee : 0}(
+                _reserve, msg.sender, vars.originationFee, s_addressesProvider.getTokenDistributor()
             );
         }
 
         // Transfer the debt-repayment portion back to the reserve.
         // For ETH, transferToReserve refunds any msg.value sent in excess.
         // For ERC-20 tokens, the payer must have approved LendingPoolCore.
-        i_core.transferToReserve{value: vars.isETH ? msg.value - vars.originationFee : 0}(
+        s_core.transferToReserve{value: vars.isETH ? msg.value - vars.originationFee : 0}(
             _reserve, payable(msg.sender), vars.paybackAmountMinusFees
         );
 
@@ -572,6 +575,44 @@ contract LendingPool is ReentrancyGuard {
             vars.borrowBalanceIncrease,
             block.timestamp
         );
+    }
+
+    /**
+     * @dev users can invoke this function to liquidate an undercollateralized position.
+     * @param _reserve the address of the collateral to liquidated
+     * @param _reserve the address of the principal reserve
+     * @param _user the address of the borrower
+     * @param _purchaseAmount the amount of principal that the liquidator wants to repay
+     * @param _receiveAToken true if the liquidators wants to receive the aTokens, false if
+     * he wants to receive the underlying asset directly
+     *
+     */
+    function liquidationCall(
+        address _collateral,
+        address _reserve,
+        address _user,
+        uint256 _purchaseAmount,
+        bool _receiveAToken
+    ) external payable nonReentrant onlyActiveReserve(_reserve) onlyActiveReserve(_collateral) {
+        // Get the address of the contract responsible for the actual liquidationlogic
+        address liquidationManager = s_addressesProvider.getLendingPoolLiquidationManager();
+
+        // LendingPool executes `liquidationCall` of LiquidationManager in LendingPool context/storage
+        (bool success, bytes memory result) = liquidationManager.delegatecall(
+            abi.encodeCall(
+                ILiquidationManager.liquidationCall, (_collateral, _reserve, _user, _purchaseAmount, _receiveAToken)
+            )
+        );
+        if (!success) {
+            revert LendingPool__LiquidationCallFailed();
+        }
+
+        // Decodes the manager’s (errorCode, errorMessage) result and reverts if the manager reports an error.
+        (uint256 returnCode, string memory returnMessage) = abi.decode(result, (uint256, string));
+
+        if (returnCode != 0) {
+            revert LendingPool__LiquidationFailed(returnMessage);
+        }
     }
 
     ////////////////////////////////
@@ -594,10 +635,10 @@ contract LendingPool is ReentrancyGuard {
     //      External & Public View & Pure Functions     //
     //////////////////////////////////////////////////////
     function getLendingPoolCoreAddress() external view returns (address) {
-        return address(i_core);
+        return address(s_core);
     }
 
     function getLendingPoolAddressesProvider() external view returns (address) {
-        return address(i_addressesProvider);
+        return address(s_addressesProvider);
     }
 }

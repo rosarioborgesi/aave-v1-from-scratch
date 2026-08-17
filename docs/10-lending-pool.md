@@ -1415,3 +1415,134 @@ emit Repay
 
 If any validation, accounting update, fee transfer, or reserve transfer fails,
 the entire repayment transaction reverts.
+
+# Liquidating an Undercollateralized Position
+
+## `liquidationCall`
+
+```solidity
+function liquidationCall(
+    address _collateral,
+    address _reserve,
+    address _user,
+    uint256 _purchaseAmount,
+    bool _receiveAToken
+) external payable nonReentrant onlyActiveReserve(_reserve) onlyActiveReserve(_collateral)
+```
+
+`liquidationCall()` lets any account repay part of an unhealthy borrower's debt
+in exchange for that borrower's enabled collateral, plus the collateral
+reserve's liquidation bonus. It is callable only when the borrower's global
+health factor is below the liquidation threshold.
+
+The parameters identify two different assets:
+
+```text
+_collateral      asset to seize from the borrower
+_reserve         debt asset the liquidator will repay
+_user            borrower being liquidated
+_purchaseAmount  requested repayment, in units of _reserve
+_receiveAToken   receive seized collateral as aTokens (true) or underlying (false)
+```
+
+Both selected reserves must be active. A reserve may be frozen: liquidation is
+still allowed because it reduces protocol risk. The manager further requires
+that the borrower has a balance of `_collateral`, that the reserve and borrower
+have it enabled as collateral, and that the borrower has debt in `_reserve`.
+
+## Delegated Liquidation Logic
+
+`LendingPool` is the external entry point, but deliberately keeps liquidation
+logic in the address-provider configured `LendingPoolLiquidationManager`:
+
+```solidity
+address liquidationManager =
+    s_addressesProvider.getLendingPoolLiquidationManager();
+
+(bool success, bytes memory result) = liquidationManager.delegatecall(
+    abi.encodeCall(
+        ILiquidationManager.liquidationCall,
+        (_collateral, _reserve, _user, _purchaseAmount, _receiveAToken)
+    )
+);
+```
+
+`delegatecall` executes the manager's code in the `LendingPool`'s context:
+the manager reads and updates the pool's storage and sees the original caller
+as `msg.sender`. Thus the liquidator is the account that called
+`LendingPool.liquidationCall()`, rather than the pool itself. The manager
+returns `(errorCode, errorMessage)` instead of reverting for its expected
+validation failures. The pool converts a non-zero code into
+`LendingPool__LiquidationFailed(errorMessage)`; a failed delegate call becomes
+`LendingPool__LiquidationCallFailed()`.
+
+## Repayment and Collateral Amounts
+
+The requested amount is not necessarily what the liquidator pays. The manager
+first applies the fixed 50% close factor:
+
+```text
+maximum principal repayment = borrower's compounded debt × 50 / 100
+actual repayment = min(_purchaseAmount, maximum principal repayment)
+```
+
+It then calculates the corresponding collateral using oracle prices and the
+collateral reserve's liquidation bonus:
+
+```text
+collateral seized =
+    debt-asset price × actual repayment
+    / collateral-asset price
+    × liquidation bonus / 100
+```
+
+For a `105` bonus, repaying debt worth `100` units of value entitles the
+liquidator to collateral worth `105` units. If the borrower does not have
+enough selected collateral, the manager seizes all of it and reduces the
+repayment to the amount that collateral can support. The liquidator therefore
+never pays the requested amount merely because it was supplied as
+`_purchaseAmount`.
+
+Any outstanding origination fee is handled separately. To the extent remaining
+collateral can cover it, the manager seizes additional collateral (including
+the same liquidation bonus), burns the matching borrower aTokens, and sends
+that underlying collateral to the token distributor. This fee collateral is
+not paid to the liquidator.
+
+## Settlement Choices
+
+After updating the debt, borrower, reserve, interest-rate, and timestamp
+accounting, the manager settles the collateral according to `_receiveAToken`:
+
+```text
+true   transfer the borrower's collateral aTokens to the liquidator
+false  burn the borrower's collateral aTokens and send underlying collateral
+```
+
+Receiving aTokens leaves the underlying in the reserve and gives the
+liquidator the interest-bearing position. Receiving underlying requires the
+reserve to have enough available liquidity for the liquidator's collateral
+amount; otherwise the call reverts. This liquidity check does not apply to the
+aToken path.
+
+Finally, the liquidator pays `actual repayment` of `_reserve` into
+`LendingPoolCore`. For an ERC20 debt asset, the liquidator must approve the
+core to transfer that amount. For the native-ETH reserve, `msg.value` is
+forwarded to the core and must cover the actual repayment.
+
+## Example
+
+Assume a borrower has `100 DAI` enabled as collateral and owes `0.02 WETH`.
+DAI falls to `0.00025 ETH`, DAI's liquidation bonus is `105%`, and the
+liquidator requests to repay all `0.02 WETH`:
+
+```text
+close-factor repayment = 0.02 WETH × 50% = 0.01 WETH
+seized DAI = 0.01 ETH / 0.00025 ETH per DAI × 105% = 42 DAI
+```
+
+The liquidator pays `0.01 WETH`, not `0.02 WETH`. With
+`_receiveAToken = false`, they receive `42 DAI` underlying; with
+`_receiveAToken = true`, they receive `42 aDAI`. Any liquidatable origination
+fee uses additional collateral left after those `42 DAI` and is sent to the
+protocol's token distributor.

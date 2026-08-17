@@ -5,7 +5,7 @@
 
 # Main Responsibilities
 
-The current implementation of `AToken` has eight main responsibilities:
+The current implementation of `AToken` has nine main responsibilities:
 
 ```text
 1. Mint aTokens when a user deposits.
@@ -16,6 +16,7 @@ The current implementation of `AToken` has eight main responsibilities:
 6. Redeem aTokens for the underlying reserve asset.
 7. Prevent redemptions that would make a borrowing position unsafe.
 8. Clear user accounting data after a full redemption when possible.
+9. Move or burn aTokens when collateral is liquidated.
 ```
 
 ## Underlying Asset
@@ -30,6 +31,41 @@ aUSDC represents USDC
 ```
 
 The underlying asset itself is held by `LendingPoolCore`, not by `AToken`.
+
+REMOVED REDIRECTION OF INTEREST!
+NOTE: In building AToken we removed everything that has to do with redirection of interest because it has been deprecated in AAve V2 and only complicated understanding how the ATokn works.
+
+So with respecte to Aave V! I have removed:
+
+Yes—if your goal is a V1 rebuild without interest redirection, you can safely remove all the redirection-only state and logic.
+
+Remove:
+
+Events:
+InterestStreamRedirected
+RedirectedBalanceUpdated
+InterestRedirectionAllowanceChanged
+Storage mappings:
+interestRedirectionAddresses
+redirectedBalances
+interestRedirectionAllowances
+External functions:
+redirectInterestStream
+redirectInterestStreamOf
+allowInterestRedirectionTo
+View functions:
+getInterestRedirectionAddress
+getRedirectedBalance
+Internal functions:
+updateRedirectedBalanceOfRedirectionAddressInternal
+redirectInterestStreamInternal
+
+Then remove every call to updateRedirectedBalanceOfRedirectionAddressInternal from:
+
+redeem
+mintOnDeposit
+burnOnLiquidation
+executeTransferInternal
 
 
 # Stored State
@@ -772,6 +808,101 @@ Alice aDAI balance = 0
 Alice user index = 0
 Alice receives = 105 DAI
 ```
+
+# Liquidating Collateral
+
+During a liquidation, the borrower can repay debt using collateral from their
+reserve position. The liquidator chooses whether to receive the collateral as
+aTokens or as the underlying asset. `LendingPool` is the only contract allowed
+to invoke either liquidation entry point.
+
+## `transferOnLiquidation`
+
+```solidity
+function transferOnLiquidation(
+    address _from,
+    address _to,
+    uint256 _value
+) external onlyLendingPool
+```
+
+This is used when the liquidator elects to receive aTokens. It transfers
+`_value` aTokens from the liquidated borrower (`_from`) to the liquidator
+(`_to`):
+
+```text
+borrower collateral: 100 aDAI
+liquidated amount:    40 aDAI
+
+after transfer:
+borrower:              60 aDAI
+liquidator:            40 aDAI
+```
+
+The function delegates to `_executeTransfer()`, which first materializes
+interest for both accounts and then performs the ERC-20 transfer. It does not
+call `isTransferAllowed()`: liquidation has already been authorized and sized
+by the lending-pool liquidation flow, so the ordinary user-transfer collateral
+check must not prevent it.
+
+## `burnOnLiquidation`
+
+```solidity
+function burnOnLiquidation(
+    address _account,
+    uint256 _value
+) external onlyLendingPool
+```
+
+This is used when the liquidator elects to receive the underlying asset rather
+than aTokens. `LendingPool` transfers the underlying asset to the liquidator;
+this function removes the matching aTokens from the liquidated user's balance.
+
+It first calls `_cumulateBalance(_account)` so interest accrued up to the
+liquidation is included in the user's stored balance. It then burns `_value`
+aTokens. If that leaves no aTokens, it resets the user's normalized-income
+index to zero. Finally, it emits `BurnOnLiquidation` with the interest
+materialized and the applicable user index.
+
+```text
+borrower collateral: 100 aDAI
+liquidated amount:    40 aDAI
+underlying paid out:   40 DAI
+
+after burn:
+borrower:              60 aDAI
+```
+
+## `_executeTransfer`
+
+```solidity
+function _executeTransfer(
+    address _from,
+    address _to,
+    uint256 _value
+) internal
+```
+
+This shared internal routine implements the accounting for both normal aToken
+transfers and `transferOnLiquidation()`. The public ERC-20 update hook performs
+the collateral-safety check for normal transfers before reaching this function.
+
+`_executeTransfer()` performs these steps:
+
+```text
+1. Reject a zero-value transfer.
+2. Materialize the sender's accrued interest and record its new index.
+3. Materialize the recipient's accrued interest and record its new index.
+4. Perform the ERC-20 transfer with super._update().
+5. Reset the sender's index if its balance is now zero.
+6. Emit BalanceTransfer with the transferred amount, both interest increases,
+   and both indexes.
+```
+
+Materializing each balance before the transfer is essential: interest earned
+before the transfer remains with the account that held the aTokens during that
+period, while the transferred aTokens begin accruing future interest for the
+recipient from the current normalized-income index.
 
 # Validating a Balance Decrease
 

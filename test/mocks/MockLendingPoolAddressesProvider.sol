@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-contract MockLendingPoolAddressProvider {
-    error MockLendingPoolAddressProvider__AddressIsZero();
+contract MockLendingPoolAddressesProvider {
+    error MockLendingPoolAddressesProvider__AddressIsZero();
 
     address private i_lendingPool;
     address private i_lendingPoolCore;
     address private i_lendingPoolConfigurator;
     address private i_lendingPoolDataProvider;
+    address private i_priceOracle;
 
     constructor(address _lendingPool, address _lendingPoolConfigurator) {
         if (_lendingPool == address(0) || _lendingPoolConfigurator == address(0)) {
-            revert MockLendingPoolAddressProvider__AddressIsZero();
+            revert MockLendingPoolAddressesProvider__AddressIsZero();
         }
         i_lendingPool = _lendingPool;
         i_lendingPoolConfigurator = _lendingPoolConfigurator;
@@ -19,16 +20,23 @@ contract MockLendingPoolAddressProvider {
 
     function setLendingPoolCore(address _lendingPoolCore) external {
         if (_lendingPoolCore == address(0)) {
-            revert MockLendingPoolAddressProvider__AddressIsZero();
+            revert MockLendingPoolAddressesProvider__AddressIsZero();
         }
         i_lendingPoolCore = _lendingPoolCore;
     }
 
     function setLendingPoolDataProvider(address _lendingPoolDataProvider) external {
         if (_lendingPoolDataProvider == address(0)) {
-            revert MockLendingPoolAddressProvider__AddressIsZero();
+            revert MockLendingPoolAddressesProvider__AddressIsZero();
         }
         i_lendingPoolDataProvider = _lendingPoolDataProvider;
+    }
+
+    function setPriceOracle(address _priceOracle) external {
+        if (_priceOracle == address(0)) {
+            revert MockLendingPoolAddressesProvider__AddressIsZero();
+        }
+        i_priceOracle = _priceOracle;
     }
 
     function getLendingPool() external view returns (address) {
@@ -45,5 +53,9 @@ contract MockLendingPoolAddressProvider {
 
     function getLendingPoolDataProvider() external view returns (address) {
         return i_lendingPoolDataProvider;
+    }
+
+    function getPriceOracle() external view returns (address) {
+        return i_priceOracle;
     }
 }

@@ -3,7 +3,7 @@ pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
 import {MockERC20} from "../../mocks/MockERC20.sol";
-import {MockLendingPoolAddressProvider} from "../../mocks/MockLendingPoolAddressProvider.sol";
+import {MockLendingPoolAddressesProvider} from "../../mocks/MockLendingPoolAddressesProvider.sol";
 import {MockReserveInterestRateStrategy} from "../../mocks/MockReserveInterestRateStrategy.sol";
 
 import {LendingPoolCore} from "src/lendingpool/LendingPoolCore.sol";
@@ -119,6 +119,29 @@ contract LendingPoolCoreHarness is LendingPoolCore {
         _updateReserveStateOnRepay(_reserve, _user, _paybackAmountMinusFees, _balanceIncrease);
     }
 
+    function exposedUpdatePrincipalReserveStateOnLiquidation(
+        address _reserve,
+        address _user,
+        uint256 _amountToLiquidate,
+        uint256 _balanceIncrease
+    ) external {
+        _updatePrincipalReserveStateOnLiquidation(_reserve, _user, _amountToLiquidate, _balanceIncrease);
+    }
+
+    function exposedUpdateCollateralReserveStateOnLiquidation(address _reserve) external {
+        _updateCollateralReserveStateOnLiquidation(_reserve);
+    }
+
+    function exposedUpdateUserStateOnLiquidation(
+        address _reserve,
+        address _user,
+        uint256 _amountToLiquidate,
+        uint256 _feeLiquidated,
+        uint256 _balanceIncrease
+    ) external {
+        _updateUserStateOnLiquidation(_reserve, _user, _amountToLiquidate, _feeLiquidated, _balanceIncrease);
+    }
+
     function exposedUpdateUserStateOnBorrow(
         address _reserve,
         address _user,
@@ -172,10 +195,10 @@ contract LendingPoolCoreUnitTest is Test {
     MockERC20 public token;
     MockERC20 public secondToken;
     MockReserveInterestRateStrategy public strategy;
-    MockLendingPoolAddressProvider public addressProvider;
+    MockLendingPoolAddressesProvider public addressProvider;
 
     function setUp() external {
-        addressProvider = new MockLendingPoolAddressProvider(lendingPool, configurator);
+        addressProvider = new MockLendingPoolAddressesProvider(lendingPool, configurator);
         core = new LendingPoolCoreHarness(address(addressProvider));
 
         token = new MockERC20("Mock Token", "MOCK");
@@ -2009,6 +2032,7 @@ contract LendingPoolCoreUnitTest is Test {
         core.setReserveRates(address(token), oldLiquidityRate, stableBorrowRate, oldVariableBorrowRate);
         // Store the current time as the reserve's last update so the next accrual period is exactly one year.
         uint256 previousTimestamp = block.timestamp;
+        // forge-lint: disable-next-line(unsafe-typecast)
         core.setReserveLastUpdateTimestamp(address(token), uint40(previousTimestamp));
 
         // The reserve initially has exactly the user's 100 DAI variable debt.
@@ -2389,6 +2413,7 @@ contract LendingPoolCoreUnitTest is Test {
                 lastVariableBorrowCumulativeIndex: RAY,
                 originationFee: 2 ether,
                 stableBorrowRate: 0,
+                // forge-lint: disable-next-line(unsafe-typecast)
                 lastUpdateTimestamp: uint40(previousTimestamp),
                 useAsCollateral: true
             })
@@ -2755,6 +2780,7 @@ contract LendingPoolCoreUnitTest is Test {
                 lastVariableBorrowCumulativeIndex: 0,
                 originationFee: 0,
                 stableBorrowRate: stableBorrowRate,
+                // forge-lint: disable-next-line(unsafe-typecast)
                 lastUpdateTimestamp: uint40(previousTimestamp),
                 useAsCollateral: false
             })
@@ -2801,6 +2827,7 @@ contract LendingPoolCoreUnitTest is Test {
                 lastVariableBorrowCumulativeIndex: RAY,
                 originationFee: 0,
                 stableBorrowRate: 0,
+                // forge-lint: disable-next-line(unsafe-typecast)
                 lastUpdateTimestamp: uint40(previousTimestamp),
                 useAsCollateral: false
             })
@@ -3341,5 +3368,924 @@ contract LendingPoolCoreUnitTest is Test {
         // subtracts the repayment from that debt, so Solidity panics with 0x11.
         vm.expectRevert(abi.encodeWithSignature("Panic(uint256)", 0x11));
         core.exposedUpdateUserStateOnRepay(address(token), user, 111 ether, 0, 10 ether, false);
+    }
+
+    ////////////////////////////////
+    //    updateStateOnRepay    //
+    ////////////////////////////////
+
+    // This test verifies that a partial repayment of a variable-rate loan updates both the borrower's
+    // record and the reserve’s aggregate accounting, then reprices the reserve.
+    function testUpdateStateOnRepayPartiallyRepaysVariableDebtAndRepricesReserve()
+        external
+        withInitReserve(address(token))
+    {
+        uint256 repaymentAmount = 40 ether;
+        uint256 balanceIncrease = 10 ether;
+        uint256 feeRepaid = 2 ether;
+        uint256 updateTimestamp = block.timestamp + 1 days;
+        uint256 liquidityRate = 3e25;
+        uint256 stableBorrowRate = 6e25;
+        uint256 variableBorrowRate = 7e25;
+        uint256 oldVariableBorrowRate = 5e25;
+
+        token.mint(address(core), 900 ether);
+        // Reserve debt: 50 DAI stable + 100 DAI variable
+        core.setReserveBorrows(address(token), 50 ether, 100 ether);
+        core.setReserveCurrentAverageStableBorrowRate(address(token), 8e25);
+        core.setReserveRates(address(token), 0, 0, oldVariableBorrowRate);
+
+        // User's variable debt 100 DAI
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether,
+                lastVariableBorrowCumulativeIndex: RAY,
+                originationFee: 5 ether,
+                stableBorrowRate: 0, // This marks the debt as variable
+                lastUpdateTimestamp: uint40(block.timestamp),
+                useAsCollateral: true
+            })
+        );
+        strategy.setRates(liquidityRate, stableBorrowRate, variableBorrowRate);
+        core.setReserveLastUpdateTimestamp(address(token), uint40(block.timestamp));
+        // The test moves forward 1 day
+        vm.warp(updateTimestamp);
+
+        uint256 expectedVariableBorrowIndex = RAY.rayMul((RAY + oldVariableBorrowRate / 365 days).rayPow(1 days));
+
+        vm.expectCall(
+            address(strategy),
+            // available liquidity = 900 + 40 = 940 DAI
+            // stable debt         = 50 DAI
+            // variable debt       = 70 DAI
+            // avg stable rate     = 8e25
+            abi.encodeCall(
+                IReserveInterestRateStrategy.calculateInterestRates,
+                (address(token), 940 ether, 50 ether, 70 ether, 8e25)
+            )
+        );
+        vm.expectEmit(true, false, false, true);
+        emit LendingPoolCore.ReserveUpdated(
+            address(token), liquidityRate, stableBorrowRate, variableBorrowRate, RAY, expectedVariableBorrowIndex
+        );
+
+        // User's accrued interest since their last update: 10 DAI
+        // Repayment toward princiapl/debt: 40 DAI
+        // Origination-fee repayment : 2 DAI (from 5 DAI)
+        vm.prank(lendingPool);
+        core.updateStateOnRepay(address(token), user, repaymentAmount, feeRepaid, balanceIncrease, false);
+
+        // Repayment state transition is:
+        // User debt:       100 + 10 interest - 40 repayment = 70 DAI
+        // Variable total:  100 + 10 interest - 40 repayment = 70 DAI
+        // User fee:          5 - 2 = 3 DAI
+        // Stable total:      unchanged at 50 DAI
+
+        // Because stableBorrowrate on the user is 0, the user is classified as a variable-rate borrower.
+        // Therefore _updateReserveStateOnRepay applies the interest and repayment to totalBorrowsVariable,
+        // leaving stable debt and its average rate unchanged.
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+        assertEq(reserve.totalBorrowsStable, 50 ether); // unchanged
+        assertEq(reserve.totalBorrowsVariable, 70 ether); // 100 + 10 - 40 = 70
+        assertEq(reserve.currentAverageStableBorrowRate, 8e25); // unchanged
+
+        // These 3 values are set by interest-rate strategy
+        assertEq(reserve.currentLiquidityRate, liquidityRate);
+        assertEq(reserve.currentStableBorrowRate, stableBorrowRate);
+        assertEq(reserve.currentVariableBorrowRate, variableBorrowRate);
+
+        assertEq(reserve.lastUpdateTimestamp, updateTimestamp); // warped timestamp
+        assertEq(userData.principalBorrowBalance, 70 ether); // 100 + 10 - 40 = 70
+        assertEq(userData.originationFee, 3 ether); // 5 - 2 = 3
+        assertEq(userData.lastVariableBorrowCumulativeIndex, expectedVariableBorrowIndex);
+        assertEq(userData.lastUpdateTimestamp, updateTimestamp); // warped timestamp
+        assertTrue(userData.useAsCollateral); // unchanged
+    }
+
+    // This test verifies that a partial repayment of stable-rate debt updates both the borrower
+    // and reserve correctly, including the reserve’s weighted-average stable borrow rate.
+    function testUpdateStateOnRepayPartiallyRepaysStableDebtAndRepricesReserve()
+        external
+        withInitReserve(address(token))
+    {
+        uint256 userStableRate = 5e25;
+        uint256 otherBorrowerStableRate = 10e25;
+        uint256 expectedAverageStableRate = (uint256(70 ether).wadToRay().rayMul(userStableRate)
+                + uint256(100 ether).wadToRay().rayMul(otherBorrowerStableRate))
+        .rayDiv(uint256(170 ether).wadToRay());
+        uint256 updateTimestamp = block.timestamp + 1 days;
+
+        token.mint(address(core), 900 ether);
+        // The reserve has 200 stable debt and no variable debt
+        core.setReserveBorrows(address(token), 200 ether, 0);
+        core.setReserveCurrentAverageStableBorrowRate(address(token), (userStableRate + otherBorrowerStableRate) / 2);
+
+        // The reserve’s starting average stable rate is therefore (5e25 + 10e25) / 2 = 7.5e25
+
+        // The user has 100 stable debt at 5%
+        // The user owns a 5 ether origination fee
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether,
+                lastVariableBorrowCumulativeIndex: RAY,
+                originationFee: 5 ether,
+                stableBorrowRate: userStableRate, // Stable debt is active
+                lastUpdateTimestamp: uint40(block.timestamp),
+                useAsCollateral: true
+            })
+        );
+        strategy.setRates(3e25, 6e25, 7e25);
+        vm.warp(updateTimestamp);
+
+        // the rate strategy must receive:
+        //      available liquidity = 940
+        //      stable debt         = 170
+        //      variable debt       = 0
+        //      average stable rate = expectedAverageStableRate
+        vm.expectCall(
+            address(strategy),
+            abi.encodeCall(
+                IReserveInterestRateStrategy.calculateInterestRates,
+                (address(token), 940 ether, 170 ether, 0, expectedAverageStableRate)
+            )
+        );
+        vm.expectEmit(true, false, false, true);
+        emit LendingPoolCore.ReserveUpdated(address(token), 3e25, 6e25, 7e25, RAY, RAY);
+
+        // 10 ether of interest has accrued since the user's last update
+        // The user repays 40 ether of debt and 2 ether of fee
+        vm.prank(lendingPool);
+        core.updateStateOnRepay(address(token), user, 40 ether, 2 ether, 10 ether, false);
+
+        // The core accounting transition is:
+        //  User stable debt:      100 + 10 accrued interest - 40 repaid = 70
+        //  Reserve stable debt:   200 + 10 accrued interest - 40 repaid = 170
+        //  User fee:              5 - 2 = 3
+
+        // The reserve's new weighted average is (70 × 5e25 + 100 × 10e25) / 170
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+        assertEq(reserve.totalBorrowsStable, 170 ether); // 200 + 10 -40 = 170
+        assertEq(reserve.totalBorrowsVariable, 0); // unchanged
+        assertEq(reserve.currentAverageStableBorrowRate, expectedAverageStableRate); // (70 × 5e25 + 100 × 10e25) / 170
+        assertEq(userData.principalBorrowBalance, 70 ether); // 100 + 10 - 40
+        assertEq(userData.originationFee, 3 ether); // 5- 2 = 3
+
+        // The user started at userStableRate (5e25) and still owes 70 ether afterward.
+        // Since the loan is still open, its remaining debt continues accruing at that same stable rate.
+        // This value would be reset to 0 only when the loan is fully repaid.
+        assertEq(userData.stableBorrowRate, userStableRate); // borrowers stable rate doesn't change
+
+        // This checks that the user’s stored variable-borrow index remains the reserve’s initial index (RAY == 1e27).
+        assertEq(userData.lastVariableBorrowCumulativeIndex, RAY);
+
+        assertEq(userData.lastUpdateTimestamp, updateTimestamp);
+        assertTrue(userData.useAsCollateral);
+    }
+
+    // verifies the bookkeeping for repaying a variable-rate loan completely.
+    function testUpdateStateOnRepayFullyClosesVariableLoan() external withInitReserve(address(token)) {
+        uint256 liquidityRate = 3e25;
+        uint256 stableBorrowRate = 6e25;
+        uint256 variableBorrowRate = 7e25;
+        uint256 balanceIncrease = 10 ether;
+        uint256 repaymentAmount = 110 ether;
+        uint256 updateTimestamp = block.timestamp + 1 days;
+
+        token.mint(address(core), 900 ether);
+        // The reserve has 100 of variable debt and 0 stable borrows
+        core.setReserveBorrows(address(token), 0, 100 ether);
+        // The user owes 100 principal of variable debt plus 3 origination fee
+        // stableBorrowRate = 0 marks this as variable-rate loan
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether,
+                lastVariableBorrowCumulativeIndex: RAY,
+                originationFee: 3 ether,
+                stableBorrowRate: 0,
+                lastUpdateTimestamp: uint40(block.timestamp),
+                useAsCollateral: true
+            })
+        );
+        strategy.setRates(liquidityRate, stableBorrowRate, variableBorrowRate);
+        vm.warp(updateTimestamp);
+
+        vm.expectCall(
+            address(strategy),
+            abi.encodeCall(IReserveInterestRateStrategy.calculateInterestRates, (address(token), 1_010 ether, 0, 0, 0))
+        );
+        vm.prank(lendingPool);
+        // The borrower closes 100 ether of principal plus 10 ether of accrued interest.
+        // The borrower also repays 3 ether of the outstanding origination fee.
+        core.updateStateOnRepay(address(token), user, repaymentAmount, 3 ether, balanceIncrease, true);
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        // Debt at reserve level: 100 recorded variable debt + 10 accrued interest - 110 repayment = 0 remaining debt
+        // Debt at user level: 100 principal balance + 10 accrued interest - 110 repayment = 0 remaining debt
+
+        assertEq(reserve.totalBorrowsStable, 0); // unchanged: no stable debt exists
+        assertEq(reserve.totalBorrowsVariable, 0); // 100 + 10 - 110 = 0
+        assertEq(userData.principalBorrowBalance, 0); // 100 + 10 - 110 = 0
+        assertEq(userData.originationFee, 0); // 3 - 3 = 0
+        assertEq(userData.stableBorrowRate, 0); // cleared because the loan was fully repaid
+        assertEq(userData.lastVariableBorrowCumulativeIndex, 0); // cleared because the loan was fully repaid
+        assertEq(userData.lastUpdateTimestamp, updateTimestamp);
+        assertTrue(userData.useAsCollateral);
+    }
+
+    function testUpdateStateOnRepayFullyClosesLastStableLoan() external withInitReserve(address(token)) {
+        uint256 userStableRate = 5e25;
+        uint256 balanceIncrease = 10 ether;
+        uint256 repaymentAmount = 110 ether;
+        uint256 updateTimestamp = block.timestamp + 1 days;
+
+        token.mint(address(core), 900 ether);
+        // Reserve total stable debt: 100 ether, total variable debt: 0
+        core.setReserveBorrows(address(token), 100 ether, 0);
+        core.setReserveCurrentAverageStableBorrowRate(address(token), userStableRate);
+        // User principal debt is 100 ether
+        // Origination fee: 3 ether
+        // Debt is stable because stableBorrowRate > 0
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether,
+                lastVariableBorrowCumulativeIndex: RAY,
+                originationFee: 3 ether,
+                stableBorrowRate: userStableRate,
+                lastUpdateTimestamp: uint40(block.timestamp),
+                useAsCollateral: true
+            })
+        );
+        strategy.setRates(3e25, 6e25, 7e25);
+        vm.warp(updateTimestamp);
+
+        vm.expectCall(
+            address(strategy),
+            abi.encodeCall(IReserveInterestRateStrategy.calculateInterestRates, (address(token), 1_010 ether, 0, 0, 0))
+        );
+        vm.prank(lendingPool);
+        // The borrower closes 100 ether of principal plus 10 ether of accrued interest,
+        // and repays the full 3 ether origination fee.
+        core.updateStateOnRepay(address(token), user, repaymentAmount, 3 ether, balanceIncrease, true);
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        // The stable-debt accounting is:
+        // 100 existsing stable debt + 10 accrued interest - 110 repayment = 0 remaining stable debt
+        // Because the user was the last stable borrower, the reserve has no stable loans remaining
+
+        assertEq(reserve.totalBorrowsStable, 0); // The reserve has no stable debt remaining.
+        assertEq(reserve.currentAverageStableBorrowRate, 0); // No stable debt remains to calculate an average rate.
+        assertEq(userData.principalBorrowBalance, 0); // the user has no debt remaining
+        assertEq(userData.originationFee, 0); // the user has no origination fee ramianing
+        assertEq(userData.stableBorrowRate, 0); // cleared because the loan was fully rapiad
+        assertEq(userData.lastVariableBorrowCumulativeIndex, 0); // cleared becase the loan was fully repaid
+        assertEq(userData.lastUpdateTimestamp, updateTimestamp);
+        assertTrue(userData.useAsCollateral);
+    }
+
+    // This test verifies that paying only an origination fee does not reduce loan debt,
+    // but still refreshes the reserve’s interest-rate state.
+    function testUpdateStateOnRepayFeeOnlyLeavesDebtUnchangedAndRepricesReserve()
+        external
+        withInitReserve(address(token))
+    {
+        uint256 updateTimestamp = block.timestamp + 1 days;
+        uint256 liquidityRate = 3e25;
+        uint256 stableBorrowRate = 6e25;
+        uint256 variableBorrowRate = 7e25;
+
+        token.mint(address(core), 900 ether);
+        // The reserve has 100 ether of variable-rate debt
+        core.setReserveBorrows(address(token), 0, 100 ether);
+        // The user owes 100 ether principal and 5 ether origination fee
+        // stableBorrowrate = 0 so the debt is variable-rate
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether,
+                lastVariableBorrowCumulativeIndex: RAY,
+                originationFee: 5 ether,
+                stableBorrowRate: 0,
+                lastUpdateTimestamp: uint40(block.timestamp),
+                useAsCollateral: true
+            })
+        );
+        strategy.setRates(liquidityRate, stableBorrowRate, variableBorrowRate);
+        vm.warp(updateTimestamp);
+
+        // Expect interest-rate strategy to be called with:
+        //  available liquidity: 900
+        //  stable debt: 0
+        //  variable debt: 100
+        //  average stable rate: 0
+        vm.expectCall(
+            address(strategy),
+            abi.encodeCall(
+                IReserveInterestRateStrategy.calculateInterestRates, (address(token), 900 ether, 0, 100 ether, 0)
+            )
+        );
+        vm.expectEmit(true, false, false, true);
+        emit LendingPoolCore.ReserveUpdated(
+            address(token), liquidityRate, stableBorrowRate, variableBorrowRate, RAY, RAY
+        );
+
+        // Repayment applied to debt (_paybackAmountMinusFees) : 0
+        // Origination fee paid: 2 ether
+        // Accrued interest being realized (_balanceIncrease): 0
+        // loan is not closed: false
+        vm.prank(lendingPool);
+        core.updateStateOnRepay(address(token), user, 0, 2 ether, 0, false);
+
+        // The accounting is:
+        // Debt: 100 + 0interest - 0debt repayment = 100
+        // Fee: 5 - 2 = 3
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+        assertEq(reserve.totalBorrowsVariable, 100 ether); // Unchanged
+        assertEq(reserve.currentLiquidityRate, liquidityRate); // is updated
+        assertEq(reserve.lastUpdateTimestamp, updateTimestamp);
+        assertEq(userData.principalBorrowBalance, 100 ether); // Unchanged
+        assertEq(userData.originationFee, 3 ether); // 5 - 2 = 3
+        assertEq(userData.lastUpdateTimestamp, updateTimestamp);
+        assertTrue(userData.useAsCollateral);
+    }
+
+    function testUpdateStateOnRepayRevertsWhenCallerIsNotLendingPool() external withInitReserve(address(token)) {
+        vm.prank(attacker);
+        vm.expectRevert(LendingPoolCore.LendingPoolCore__OnlyLendingPool.selector);
+        core.updateStateOnRepay(address(token), user, 1 ether, 0, 0, false);
+    }
+
+    // This test proves that updateStateOnRepay is atomic: if its user-level update fails,
+    // all earlier reserve-level updates are reverted too.
+    function testUpdateStateOnRepayRollsBackReserveChangesWhenUserUpdateReverts()
+        external
+        withInitReserve(address(token))
+    {
+        // Reserve variable debt: 200 ether
+        core.setReserveBorrows(address(token), 0, 200 ether);
+        // User variable debt: 90 ether
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 90 ether,
+                lastVariableBorrowCumulativeIndex: RAY,
+                originationFee: 0,
+                stableBorrowRate: 0,
+                lastUpdateTimestamp: uint40(block.timestamp),
+                useAsCollateral: true
+            })
+        );
+        // Simulated accrued interest: 10 ether
+        // Debt repayment: 101 ether
+
+        // The function first updates te reserve: 200 + 10 - 101 = 109 ether
+        // Then it updates the user: 90 + 10 -101 = -1 ether -> revert
+        vm.prank(lendingPool);
+        vm.expectRevert(abi.encodeWithSignature("Panic(uint256)", 0x11));
+        core.updateStateOnRepay(address(token), user, 101 ether, 0, 10 ether, false);
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        // The revert unwinds everything done earlier in the call
+        // The assertions confirm the original state remains:
+        assertEq(reserve.totalBorrowsVariable, 200 ether);
+        assertEq(reserve.lastLiquidityCumulativeIndex, RAY);
+        assertEq(reserve.lastVariableBorrowCumulativeIndex, RAY);
+        assertEq(userData.principalBorrowBalance, 90 ether);
+        assertEq(userData.lastVariableBorrowCumulativeIndex, RAY);
+        assertEq(userData.lastUpdateTimestamp, block.timestamp);
+        assertTrue(userData.useAsCollateral);
+    }
+
+    ///////////////////////////////////////////
+    //  _updateUserStateOnLiquidation         //
+    ///////////////////////////////////////////
+
+    // This test verifies the user-level bookkeeping performed when a variable-rate loan is partially liquidated.
+    function testUpdateUserStateOnLiquidationUpdatesVariableDebtFeeAndCheckpoint() external {
+        // Reserve variable-borrow index: 12e26 (1.2 RAY)
+        uint256 reserveVariableBorrowIndex = 12e26;
+        core.setReserveVariableBorrowIndex(address(token), reserveVariableBorrowIndex);
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether, // User debt principal 100 ether
+                lastVariableBorrowCumulativeIndex: RAY, // Previous user variable-debt checkpoint: RAY
+                originationFee: 5 ether, // Origination fee owed: 5 ether
+                stableBorrowRate: 0, // makes the position variable-rate
+                lastUpdateTimestamp: 1,
+                useAsCollateral: true
+            })
+        );
+        // The time is advanced to 2000
+        vm.warp(2_000);
+        // The liquidation is simulated with:
+        // _amountToLiquidate = 40 ether
+        // _feeLiquidated     = 2 ether
+        // _balanceIncrease   = 10 ether
+        core.exposedUpdateUserStateOnLiquidation(address(token), user, 40 ether, 2 ether, 10 ether);
+
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+        // The remaining debt is: 100 + 10 accrued interest - 40 liquidated = 70 ether
+        assertEq(userData.principalBorrowBalance, 70 ether);
+        assertEq(userData.originationFee, 3 ether); // 5 - 2
+        // Asserts that lastVariableBorrowCumulativeIndex is updated from the old RAY checkpoint
+        // to the reserve's current index 12e26
+        assertEq(userData.lastVariableBorrowCumulativeIndex, reserveVariableBorrowIndex);
+        assertEq(userData.stableBorrowRate, 0); // remains zero
+        assertEq(userData.lastUpdateTimestamp, 2_000);
+        assertTrue(userData.useAsCollateral); // is unchanged
+    }
+
+    function testUpdateUserStateOnLiquidationUpdatesStableDebtWithoutChangingCheckpointOrFee() external {
+        uint256 stableRate = 5e25;
+        uint256 previousVariableBorrowIndex = 11e26;
+        core.setReserveVariableBorrowIndex(address(token), 12e26);
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether,
+                lastVariableBorrowCumulativeIndex: previousVariableBorrowIndex,
+                originationFee: 5 ether,
+                stableBorrowRate: stableRate,
+                lastUpdateTimestamp: 1,
+                useAsCollateral: true
+            })
+        );
+
+        vm.warp(3_000);
+        core.exposedUpdateUserStateOnLiquidation(address(token), user, 40 ether, 0, 10 ether);
+
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+        assertEq(userData.principalBorrowBalance, 70 ether);
+        assertEq(userData.originationFee, 5 ether);
+        assertEq(userData.lastVariableBorrowCumulativeIndex, previousVariableBorrowIndex);
+        assertEq(userData.stableBorrowRate, stableRate);
+        assertEq(userData.lastUpdateTimestamp, 3_000);
+        assertTrue(userData.useAsCollateral);
+    }
+
+    function testUpdateUserStateOnLiquidationRevertsWhenLiquidationExceedsDebt() external {
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether,
+                lastVariableBorrowCumulativeIndex: RAY,
+                originationFee: 0,
+                stableBorrowRate: 0,
+                lastUpdateTimestamp: 1,
+                useAsCollateral: true
+            })
+        );
+
+        vm.expectRevert(abi.encodeWithSignature("Panic(uint256)", 0x11));
+        core.exposedUpdateUserStateOnLiquidation(address(token), user, 111 ether, 0, 10 ether);
+    }
+
+    //////////////////////////////////////////////////////////
+    //  _updatePrincipalReserveStateOnLiquidation             //
+    //////////////////////////////////////////////////////////
+
+    // verifies the reserve-level effects when a variable-rate loan is liquidated.
+    function testUpdatePrincipalReserveStateOnLiquidationUpdatesVariableDebtAndCheckpointsIndexes()
+        external
+        withInitReserve(address(token))
+    {
+        uint256 oldLiquidityRate = 5e25;
+        uint256 oldVariableBorrowRate = 10e25;
+        uint256 previousTimestamp = block.timestamp;
+        uint256 balanceIncrease = 10 ether; // accrued-interest amount of 10 tokens.
+        uint256 liquidatedAmount = 30 ether; // liquidation repayment of 30 tokens.
+
+        // 5% liquidity rate and 10% variable borrow rate.
+        core.setReserveRates(address(token), oldLiquidityRate, 0, oldVariableBorrowRate);
+        // Reserve has 100 tokens of variable debt (user) and 50 tokens of stable debt
+        core.setReserveBorrows(address(token), 50 ether, 100 ether);
+        core.setReserveCurrentAverageStableBorrowRate(address(token), 8e25);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        core.setReserveLastUpdateTimestamp(address(token), uint40(previousTimestamp));
+        // User has 100 tokens of variable debt
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether,
+                lastVariableBorrowCumulativeIndex: RAY,
+                originationFee: 0,
+                stableBorrowRate: 0, // makes the position variable-rate
+                // forge-lint: disable-next-line(unsafe-typecast)
+                lastUpdateTimestamp: uint40(previousTimestamp),
+                useAsCollateral: false
+            })
+        );
+        // A full year passes
+        vm.warp(previousTimestamp + 365 days);
+        core.exposedUpdatePrincipalReserveStateOnLiquidation(address(token), user, liquidatedAmount, balanceIncrease);
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+        uint256 expectedVariableIndex = RAY.rayMul((RAY + oldVariableBorrowRate / 365 days).rayPow(365 days));
+
+        // Checks that reserve.increaseTotalBorrowsVariable and reserve.decreaseTotalBorrowsVariable were called
+        // The expected variable debt is 100 existing variable debt + 10 accrued interest - 30 liquidated repayment = 80
+        assertEq(reserve.totalBorrowsVariable, 100 ether + balanceIncrease - liquidatedAmount); // 80
+
+        // Checks that the STABLE-rate branch was skipped
+        assertEq(reserve.totalBorrowsStable, 50 ether); // Stable debt stays at 50
+        assertEq(reserve.currentAverageStableBorrowRate, 8e25); // stable weighted-average rate stays at 8%
+
+        // Checks that reserve.updateCumulativeIndexes() was called
+        // The liquidity index is expected to increase linearly using the prior 5% liquidity rate: RAY + 5%
+        assertEq(reserve.lastLiquidityCumulativeIndex, RAY + oldLiquidityRate);
+        // The variable-borrow index is expected to compound for one year using the prior 10% variable rate.
+        assertEq(reserve.lastVariableBorrowCumulativeIndex, expectedVariableIndex);
+    }
+
+    // The test verifies liquidation accounting for a borrower with stable-rate debt.
+    function testUpdatePrincipalReserveStateOnLiquidationUpdatesStableDebtAndWeightedAverageRate()
+        external
+        withInitReserve(address(token))
+    {
+        uint256 userStableRate = 5e25; // 5%
+        uint256 otherBorrowerStableRate = 10e25;
+        uint256 userPrincipal = 100 ether;
+        uint256 otherBorrowerPrincipal = 100 ether;
+        uint256 balanceIncrease = 10 ether; // accrued interest of 10
+        uint256 liquidatedAmount = 40 ether; // liquidator repays 40
+        // Total stable debt is: user 100 ether + other borrowers 100 ether = 200 ether
+        uint256 initialTotalStableDebt = userPrincipal + otherBorrowerPrincipal;
+        // Reserve's average stable rate is: (100 * 5% + 100 * 10%) / 200
+        uint256 initialAverageStableRate = (userStableRate + otherBorrowerStableRate) / 2;
+
+        core.setReserveBorrows(address(token), initialTotalStableDebt, 0);
+        core.setReserveCurrentAverageStableBorrowRate(address(token), initialAverageStableRate);
+        // User owes 100 tokens at 5%.
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: userPrincipal,
+                lastVariableBorrowCumulativeIndex: 0,
+                originationFee: 0,
+                stableBorrowRate: userStableRate, // makes the position stable-rate
+                lastUpdateTimestamp: uint40(block.timestamp),
+                useAsCollateral: false
+            })
+        );
+
+        core.exposedUpdatePrincipalReserveStateOnLiquidation(address(token), user, liquidatedAmount, balanceIncrease);
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+        uint256 expectedStableDebt = initialTotalStableDebt + balanceIncrease - liquidatedAmount; // 200 + 10 - 40 = 170
+        uint256 remainingUserDebt = userPrincipal + balanceIncrease - liquidatedAmount; // 100 + 10 - 40 = 70
+        uint256 expectedAverageStableRate = (remainingUserDebt.wadToRay().rayMul(userStableRate)
+                + otherBorrowerPrincipal.wadToRay().rayMul(otherBorrowerStableRate))
+        .rayDiv(expectedStableDebt.wadToRay()); // (70 * 5% + 100 * 10%) / 170 = 7.941176.. %
+
+        assertEq(reserve.totalBorrowsStable, expectedStableDebt);
+        assertEq(reserve.currentAverageStableBorrowRate, expectedAverageStableRate);
+        assertEq(reserve.totalBorrowsVariable, 0);
+    }
+
+    //////////////////////////////////////////////////////////
+    //  _updateCollateralReserveStateOnLiquidation            //
+    //////////////////////////////////////////////////////////
+
+    function testUpdateCollateralReserveStateOnLiquidationUpdatesCumulativeIndexes()
+        external
+        withInitReserve(address(token))
+    {
+        uint256 liquidityRate = 5e25;
+        uint256 variableBorrowRate = 10e25;
+        uint256 initialStableBorrows = 50 ether;
+        uint256 initialVariableBorrows = 100 ether;
+        uint256 previousTimestamp = block.timestamp;
+
+        core.setReserveRates(address(token), liquidityRate, 0, variableBorrowRate);
+        core.setReserveBorrows(address(token), initialStableBorrows, initialVariableBorrows);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        core.setReserveLastUpdateTimestamp(address(token), uint40(previousTimestamp));
+
+        vm.warp(previousTimestamp + 365 days);
+        core.exposedUpdateCollateralReserveStateOnLiquidation(address(token));
+
+        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
+        uint256 expectedVariableBorrowIndex = RAY.rayMul((RAY + variableBorrowRate / 365 days).rayPow(365 days));
+
+        assertEq(reserve.lastLiquidityCumulativeIndex, RAY + liquidityRate);
+        assertEq(reserve.lastVariableBorrowCumulativeIndex, expectedVariableBorrowIndex);
+        assertEq(reserve.totalBorrowsStable, initialStableBorrows);
+        assertEq(reserve.totalBorrowsVariable, initialVariableBorrows);
+        assertEq(reserve.currentLiquidityRate, liquidityRate);
+        assertEq(reserve.currentVariableBorrowRate, variableBorrowRate);
+    }
+
+    //////////////////////////////////////////
+    //      updateStateOnLiquidation         //
+    //////////////////////////////////////////
+
+    // liquidating a borrower with variable-rate debt correctly updates both pool-wide and user-specific accounting,
+    // when the liquidator receives aTokens as collateral.
+    function testUpdateStateOnLiquidationVariableDebtWithATokenCollateralUpdatesPrincipalAndUserState()
+        external
+        withInitReserve(address(token))
+        withInitReserve(address(secondToken))
+    {
+        uint256 availableLiquidity = 1_000 ether;
+        uint256 amountToLiquidate = 40 ether;
+        uint256 balanceIncrease = 10 ether;
+        uint256 feeLiquidated = 2 ether;
+        uint256 newLiquidityRate = 3e25;
+        uint256 newStableBorrowRate = 6e25;
+        uint256 newVariableBorrowRate = 7e25;
+
+        token.mint(address(core), availableLiquidity);
+        // Reserve debt totals: 50 ether stable + 100 ether variable
+        core.setReserveBorrows(address(token), 50 ether, 100 ether);
+        core.setReserveCurrentAverageStableBorrowRate(address(token), 8e25);
+        // User debt: 100 ether variable debt + 5 ether origination fee.
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether,
+                lastVariableBorrowCumulativeIndex: RAY,
+                originationFee: 5 ether,
+                stableBorrowRate: 0, // this makes user's debt variable-rate
+                lastUpdateTimestamp: uint40(block.timestamp),
+                useAsCollateral: true
+            })
+        );
+        strategy.setRates(newLiquidityRate, newStableBorrowRate, newVariableBorrowRate);
+
+        // The mocked interest-rate strategy must be called with:
+        //    available liquidity = 1,000 + 40
+        //    stable borrows      = 50
+        //    variable borrows    = 70
+        //    average stable rate = 8e25
+        vm.expectCall(
+            address(strategy),
+            abi.encodeCall(
+                IReserveInterestRateStrategy.calculateInterestRates,
+                (address(token), availableLiquidity + amountToLiquidate, 50 ether, 70 ether, 8e25)
+            )
+        );
+        vm.expectEmit(true, false, false, true);
+        emit LendingPoolCore.ReserveUpdated(
+            address(token), newLiquidityRate, newStableBorrowRate, newVariableBorrowRate, RAY, RAY
+        );
+
+        vm.prank(lendingPool);
+        // Liquidation repays 40 ether
+        // The user has accrued 10 ether interest since their last update
+        // 2 ether of the origination fee is liquidated
+        core.updateStateOnLiquidation(
+            address(token), address(secondToken), user, amountToLiquidate, 0, feeLiquidated, 0, balanceIncrease, true
+        );
+
+        CoreLibrary.ReserveData memory principalReserve = core.getReserveData(address(token));
+        CoreLibrary.ReserveData memory collateralReserve = core.getReserveData(address(secondToken));
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        // Debt after accrued interest = 100 + 10 = 110
+        // Debt after liquidation      = 110 - 40 = 70
+
+        // Reserve stable debt unchanged = 50
+        assertEq(principalReserve.totalBorrowsStable, 50 ether);
+        // Reserve variable debt = 100 + 10 - 40 = 70
+        assertEq(principalReserve.totalBorrowsVariable, 70 ether);
+        assertEq(principalReserve.currentLiquidityRate, newLiquidityRate);
+        assertEq(principalReserve.currentStableBorrowRate, newStableBorrowRate);
+        assertEq(principalReserve.currentVariableBorrowRate, newVariableBorrowRate);
+
+        // User principal debt = 100 + 10 - 40 = 70
+        assertEq(userData.principalBorrowBalance, 70 ether);
+        // User fee = 5 - 2 = 3
+        assertEq(userData.originationFee, 3 ether);
+        // User's variable-borrow index remains RAY because no time has advanced
+        assertEq(userData.lastVariableBorrowCumulativeIndex, RAY);
+        assertEq(userData.lastUpdateTimestamp, block.timestamp);
+
+        // Since liquidatorReceivesAToken == true, the code skips:
+        //      _updateReserveInterestRatesAndTimestamp(_collateralReserve, ...)
+        //
+        // The collateral remains in the pool; only its aToken ownership changes.
+        // With no liquidity leaving the collateral reserve, its utilization and rates
+        // should not need recalculation.
+        assertEq(collateralReserve.currentLiquidityRate, 0);
+        assertEq(collateralReserve.currentStableBorrowRate, 0);
+        assertEq(collateralReserve.currentVariableBorrowRate, 0);
+    }
+
+    function testUpdateStateOnLiquidationStableDebtWithATokenCollateralUpdatesWeightedAverageRate()
+        external
+        withInitReserve(address(token))
+        withInitReserve(address(secondToken))
+    {
+        uint256 userStableRate = 5e25;
+        uint256 otherBorrowerStableRate = 10e25;
+        uint256 amountToLiquidate = 40 ether;
+        uint256 balanceIncrease = 10 ether;
+        uint256 expectedStableDebt = 170 ether;
+        uint256 remainingUserDebt = 70 ether;
+        uint256 otherBorrowerDebt = 100 ether;
+        uint256 expectedAverageStableRate = (remainingUserDebt.wadToRay().rayMul(userStableRate)
+                + otherBorrowerDebt.wadToRay().rayMul(otherBorrowerStableRate))
+        .rayDiv(expectedStableDebt.wadToRay());
+
+        token.mint(address(core), 1_000 ether);
+        // Total reserve stable debt   = 200
+        // Total reserve variable debt = 0
+        core.setReserveBorrows(address(token), 200 ether, 0);
+        core.setReserveCurrentAverageStableBorrowRate(address(token), (userStableRate + otherBorrowerStableRate) / 2);
+
+        // Other borrowers debt: 100 at 10%
+
+        // User debt = 100 at 5%
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether,
+                lastVariableBorrowCumulativeIndex: 0,
+                originationFee: 5 ether,
+                stableBorrowRate: userStableRate, // > 0 This means user has an active stable debt
+                lastUpdateTimestamp: uint40(block.timestamp),
+                useAsCollateral: true
+            })
+        );
+        strategy.setRates(3e25, 6e25, 7e25);
+
+        vm.expectCall(
+            address(strategy),
+            // available liquidity: 1,040 (1,000 + 40 repayment)
+            // stable debt: 170
+            // variable debt: 0
+            // weighted average: expectedAverageStableRate
+            abi.encodeCall(
+                IReserveInterestRateStrategy.calculateInterestRates,
+                (address(token), 1_000 ether + amountToLiquidate, expectedStableDebt, 0, expectedAverageStableRate)
+            )
+        );
+
+        // The user has 10 of interest and the liquidator repays 40
+        vm.prank(lendingPool);
+        core.updateStateOnLiquidation(
+            address(token), address(secondToken), user, amountToLiquidate, 0, 0, 0, balanceIncrease, true
+        );
+
+        CoreLibrary.ReserveData memory principalReserve = core.getReserveData(address(token));
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+
+        // Expected stable debt = 200 + 10 - 40 = 170
+
+        // The remaining loans are:
+        //  - liquidated user: 70 debt and 5% stable rate
+        //  - other borrower: 100 debt and 10% stable rate
+        assertEq(principalReserve.totalBorrowsStable, expectedStableDebt); // 170 ether
+        assertEq(principalReserve.totalBorrowsVariable, 0); // No variable debt
+        // Expected reserve average is: (70 x 5% + 100 x 10%) / 170 = 7.941176.. %
+        assertEq(principalReserve.currentAverageStableBorrowRate, expectedAverageStableRate);
+        assertEq(userData.principalBorrowBalance, 70 ether); // 100 + 10 - 40 = 70 ether
+        assertEq(userData.originationFee, 5 ether); // unchanged
+        assertEq(userData.stableBorrowRate, userStableRate); // remains at 5%
+        assertEq(userData.lastVariableBorrowCumulativeIndex, 0); // unchanged
+        assertEq(userData.lastUpdateTimestamp, block.timestamp);
+
+        // liquidatorReceivesAToken = true means collateral stays in the pool,
+        // so only aToken ownership transfers; collateral-reserve rates do not need recalculation.
+    }
+
+    // an unauthorized account cannot liquidate a position or partially alter the protocol’s accounting.
+    function testUpdateStateOnLiquidationRevertsForNonLendingPoolWithoutChangingState()
+        external
+        withInitReserve(address(token))
+        withInitReserve(address(secondToken))
+    {
+        core.setReserveBorrows(address(token), 50 ether, 100 ether);
+        core.setReserveBorrows(address(secondToken), 25 ether, 30 ether);
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                principalBorrowBalance: 100 ether,
+                lastVariableBorrowCumulativeIndex: RAY,
+                originationFee: 5 ether,
+                stableBorrowRate: 0,
+                lastUpdateTimestamp: uint40(block.timestamp),
+                useAsCollateral: true
+            })
+        );
+        CoreLibrary.ReserveData memory principalBefore = core.getReserveData(address(token));
+        CoreLibrary.ReserveData memory collateralBefore = core.getReserveData(address(secondToken));
+        CoreLibrary.UserReserveData memory userBefore = core.getUserReserveData(user, address(token));
+
+        vm.expectRevert(LendingPoolCore.LendingPoolCore__OnlyLendingPool.selector);
+        vm.prank(attacker);
+        core.updateStateOnLiquidation(
+            address(token), address(secondToken), user, 40 ether, 0, 2 ether, 0, 10 ether, true
+        );
+
+        CoreLibrary.ReserveData memory principalAfter = core.getReserveData(address(token));
+        CoreLibrary.ReserveData memory collateralAfter = core.getReserveData(address(secondToken));
+        CoreLibrary.UserReserveData memory userAfter = core.getUserReserveData(user, address(token));
+
+        assertEq(principalAfter.totalBorrowsStable, principalBefore.totalBorrowsStable);
+        assertEq(principalAfter.totalBorrowsVariable, principalBefore.totalBorrowsVariable);
+        assertEq(principalAfter.lastLiquidityCumulativeIndex, principalBefore.lastLiquidityCumulativeIndex);
+        assertEq(principalAfter.lastVariableBorrowCumulativeIndex, principalBefore.lastVariableBorrowCumulativeIndex);
+        assertEq(collateralAfter.totalBorrowsStable, collateralBefore.totalBorrowsStable);
+        assertEq(collateralAfter.totalBorrowsVariable, collateralBefore.totalBorrowsVariable);
+        assertEq(collateralAfter.lastLiquidityCumulativeIndex, collateralBefore.lastLiquidityCumulativeIndex);
+        assertEq(collateralAfter.lastVariableBorrowCumulativeIndex, collateralBefore.lastVariableBorrowCumulativeIndex);
+        assertEq(userAfter.principalBorrowBalance, userBefore.principalBorrowBalance);
+        assertEq(userAfter.originationFee, userBefore.originationFee);
+        assertEq(userAfter.lastVariableBorrowCumulativeIndex, userBefore.lastVariableBorrowCumulativeIndex);
+        assertEq(userAfter.lastUpdateTimestamp, userBefore.lastUpdateTimestamp);
+    }
+
+    ////////////////////////////////
+    //        liquidateFee         //
+    ////////////////////////////////
+
+    function testLiquidateFeeTransfersERC20FromCoreToDestination() external {
+        address destination = makeAddr("feeCollector");
+        uint256 feeAmount = 10 ether;
+        token.mint(address(core), feeAmount);
+
+        vm.prank(lendingPool);
+        core.liquidateFee(address(token), feeAmount, payable(destination));
+
+        assertEq(token.balanceOf(address(core)), 0);
+        assertEq(token.balanceOf(destination), feeAmount);
+    }
+
+    function testLiquidateFeeTransfersEthFromCoreToDestination() external {
+        address destination = makeAddr("feeCollector");
+        uint256 feeAmount = 1 ether;
+        vm.deal(address(core), feeAmount);
+
+        vm.prank(lendingPool);
+        core.liquidateFee(EthAddressLib.ethAddress(), feeAmount, payable(destination));
+
+        assertEq(address(core).balance, 0);
+        assertEq(destination.balance, feeAmount);
+    }
+
+    function testLiquidateFeeRevertsWhenCallerIsNotLendingPool() external {
+        vm.prank(attacker);
+        vm.expectRevert(LendingPoolCore.LendingPoolCore__OnlyLendingPool.selector);
+        core.liquidateFee(address(token), 1 ether, payable(makeAddr("feeCollector")));
+    }
+
+    function testLiquidateFeeRevertsWhenEthDestinationRejectsPayment() external {
+        RejectEthReceiver receiver = new RejectEthReceiver();
+        uint256 feeAmount = 1 ether;
+        vm.deal(address(core), feeAmount);
+
+        vm.prank(lendingPool);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                LendingPoolCore.LendingPoolCore__EthTransferFailed.selector, address(receiver), feeAmount
+            )
+        );
+        core.liquidateFee(EthAddressLib.ethAddress(), feeAmount, payable(address(receiver)));
+
+        assertEq(address(core).balance, feeAmount);
+    }
+
+    function testLiquidateFeeRevertsWhenCoreHasInsufficientERC20Balance() external {
+        address destination = makeAddr("feeCollector");
+        uint256 coreBalance = 1 ether;
+        uint256 feeAmount = 2 ether;
+        token.mint(address(core), coreBalance);
+
+        vm.prank(lendingPool);
+        vm.expectRevert();
+        core.liquidateFee(address(token), feeAmount, payable(destination));
+
+        assertEq(token.balanceOf(address(core)), coreBalance);
+        assertEq(token.balanceOf(destination), 0);
     }
 }

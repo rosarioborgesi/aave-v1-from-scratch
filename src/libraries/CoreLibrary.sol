@@ -268,53 +268,6 @@ library CoreLibrary {
         // This function removes stable-rate debt from a reserve
         // and recalculates the reserve's average stable borrow rate
 
-        // Every stable-rate borrower can have a different rate:
-        // Alice: 1,000 DAI at 5%
-        // Bob: 500 DAI at 8%
-        // The reserve therefore stores a weighted avarage of all stable rates
-
-        // Formula when stable debt is removed:
-        //
-        // newAverageRate =
-        //     (
-        //         previousTotalDebt * previousAverageRate
-        //             - removedDebt * removedDebtRate
-        //     )
-        //     / remainingDebt;
-
-        // Example:
-        //
-        // Stable-rate positions:
-        // Alice: 1,000 DAI at 5%
-        // Bob:     500 DAI at 8%
-        //
-        // Total stable debt:
-        // 1,000 + 500 = 1,500 DAI
-        //
-        // Current average stable rate:
-        // (1,000 * 5% + 500 * 8%) / 1,500
-        // = (50 + 40) / 1,500
-        // = 6%
-        //
-        // Bob's 500 DAI position at 8% is removed.
-        //
-        // Remaining stable debt:
-        // 1,500 - 500 = 1,000 DAI
-        //
-        // Previous weighted interest:
-        // 1,500 * 6% = 90
-        //
-        // Removed weighted interest:
-        // 500 * 8% = 40
-        //
-        // New average stable rate:
-        // (90 - 40) / 1,000
-        // = 50 / 1,000
-        // = 5%
-        //
-        // The result is correct because only Alice's
-        // 1,000 DAI position at 5% remains.
-
         // The function cannot remove more stable debt than the reserve currently contains
         if (_reserve.totalBorrowsStable < _amount) {
             revert CoreLibrary__InvalidAmountToDecrease();
@@ -334,6 +287,9 @@ library CoreLibrary {
             _reserve.currentAverageStableBorrowRate = 0;
             return;
         }
+
+        // Formula when stable debt is removed:
+        // newAverageRate = (previousTotalDebt * previousAverageRate - removedDebt * removedDebtRate) / remainingDebt;
 
         // Calculate the interest weight associated with the debt being removed
         // Removed amount x its stable rate
