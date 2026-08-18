@@ -294,40 +294,6 @@ These are not project-specific contracts, but the deposit flow relies on them.
 - `SafeERC20.safeTransferFrom()` is used by `LendingPoolCore.transferToReserve()`.
 - `Ownable.onlyOwner` protects address-provider setters.
 
-## Required Setup Before Deposit
-
-A reserve must be configured before users can deposit into it.
-
-Minimum setup order:
-
-1. Deploy `LendingPoolAddressesProvider`.
-2. Deploy `LendingPoolCore` with the addresses provider.
-3. Register the core with `setLendingPoolCore()`.
-4. Deploy `LendingPool` with the addresses provider.
-5. Register the pool with `setLendingPool()`.
-6. Register the configurator with `setLendingPoolConfigurator()`.
-7. Deploy the reserve token, such as DAI.
-8. Deploy the matching aToken, such as aDAI.
-9. Deploy or select an interest rate strategy.
-10. From the registered configurator, call `core.initReserve()`.
-11. Give the user reserve tokens.
-12. User calls `reserve.approve(address(core), amount)`.
-13. User calls `pool.deposit(reserve, amount, referralCode)`.
-
-The important reserve initialization call is:
-
-```solidity
-core.initReserve(
-    reserve,
-    aToken,
-    reserveDecimals,
-    interestRateStrategy
-);
-```
-
-This stores the aToken address, sets the initial liquidity and variable borrow
-indexes to `1 ray`, stores the interest rate strategy, and marks the reserve as
-active and not frozen.
 
 ## `LendingPool.deposit()` Execution
 

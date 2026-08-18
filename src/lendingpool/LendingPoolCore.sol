@@ -642,6 +642,40 @@ contract LendingPoolCore {
         }
     }
 
+    /**
+     * @dev updates the state of the core as a consequence of a swap rate action.
+     * @param _reserve the address of the reserve on which the user is repaying
+     * @param _user the address of the borrower
+     * @param _principalBorrowBalance the amount borrowed by the user
+     * @param _compoundedBorrowBalance the amount borrowed plus accrued interest
+     * @param _balanceIncrease the accrued interest on the borrowed amount
+     * @param _currentRateMode the current interest rate mode for the user
+     *
+     */
+    function updateStateOnSwapRate(
+        address _reserve,
+        address _user,
+        uint256 _principalBorrowBalance,
+        uint256 _compoundedBorrowBalance,
+        uint256 _balanceIncrease,
+        CoreLibrary.InterestRateMode _currentRateMode
+    ) external onlyLendingPool returns (CoreLibrary.InterestRateMode, uint256) {
+        // Update reserve-wide borrow totals and indexes
+        // It compounds the reserve indexes, then moves the user's debt
+        _updateReserveStateOnSwapRate(
+            _reserve, _user, _principalBorrowBalance, _compoundedBorrowBalance, _currentRateMode
+        );
+
+        // Update borrower's rate-specific state
+        CoreLibrary.InterestRateMode newRateMode =
+            _updateUserStateOnSwapRate(_reserve, _user, _balanceIncrease, _currentRateMode);
+
+        // Recalculate the reserve rates
+        _updateReserveInterestRatesAndTimestamp(_reserve, 0, 0);
+
+        return (newRateMode, _getUserCurrentBorrowRate(_reserve, _user));
+    }
+
     ////////////////////////////////
     //       Public Functions     //
     ////////////////////////////////
@@ -1077,6 +1111,108 @@ contract LendingPoolCore {
 
         // Stores the time of this accounting update.
         user.lastUpdateTimestamp = uint40(block.timestamp);
+    }
+
+    /**
+     * @dev updates the state of the reserve as a consequence of a swap rate action.
+     * @param _reserve the address of the reserve on which the user is performing the rate swap
+     * @param _user the address of the borrower
+     * @param _principalBorrowBalance the the principal amount borrowed by the user
+     * @param _compoundedBorrowBalance the principal amount plus the accrued interest
+     * @param _currentRateMode the rate mode at which the user borrowed
+     *
+     */
+    function _updateReserveStateOnSwapRate(
+        address _reserve,
+        address _user,
+        uint256 _principalBorrowBalance,
+        uint256 _compoundedBorrowBalance,
+        CoreLibrary.InterestRateMode _currentRateMode
+    ) internal {
+        // A rate swap realizes the borrower's accrued interest into their debt balance,
+        // then transfers the updated debt from one aggregate borrowing category to the other
+
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
+
+        // Updates the reserve’s liquidity and variable-borrow indexes with compounding.
+        reserve.updateCumulativeIndexes();
+
+        if (_currentRateMode == CoreLibrary.InterestRateMode.STABLE) {
+            // Stable to variable swap
+
+            // Read the user's stable borrow rate
+            uint256 userCurrentStableRate = user.stableBorrowRate;
+
+            // Remove the old principal from stable borrows at the borrower’s existing stable rate.
+            reserve.decreaseTotalBorrowsStableAndUpdateAverageRate(_principalBorrowBalance, userCurrentStableRate);
+
+            // Add the interest-inclusive balance to variable borrows
+            reserve.increaseTotalBorrowsVariable(_compoundedBorrowBalance);
+        } else if (_currentRateMode == CoreLibrary.InterestRateMode.VARIABLE) {
+            // Variable to stable swap
+
+            // Read the reserve's current stable borrow rate
+            uint256 currentStableRate = reserve.currentStableBorrowRate;
+
+            // Remove the old principal from the variable borrows
+            reserve.decreaseTotalBorrowsVariable(_principalBorrowBalance);
+
+            // Add the interest-cinlusive balance to stable borrows at the reserve’s currently offered stable rate.
+            reserve.increaseTotalBorrowsStableAndUpdateAverageRate(_compoundedBorrowBalance, currentStableRate);
+        } else {
+            // Any mode other than STABLE or VARIABLE reverts
+            revert LendingPoolCore__InvalidBorrowRateMode();
+        }
+    }
+
+    /**
+     * @dev updates the state of the user as a consequence of a swap rate action.
+     * @param _reserve the address of the reserve on which the user is performing the swap
+     * @param _user the address of the borrower
+     * @param _balanceIncrease the accrued interest on the borrowed amount
+     * @param _currentRateMode the current rate mode of the user
+     *
+     */
+    function _updateUserStateOnSwapRate(
+        address _reserve,
+        address _user,
+        uint256 _balanceIncrease,
+        CoreLibrary.InterestRateMode _currentRateMode
+    ) internal returns (CoreLibrary.InterestRateMode) {
+        // Read user data and reserve's current state
+        CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+
+        // initializes the return value
+        CoreLibrary.InterestRateMode newMode = CoreLibrary.InterestRateMode.NONE;
+
+        if (_currentRateMode == CoreLibrary.InterestRateMode.VARIABLE) {
+            // Switch VARIABLE to STABLE
+            // Sets the return value to STABLE
+            newMode = CoreLibrary.InterestRateMode.STABLE;
+            // Sets stableBorrowRate to the reserve’s current stable borrow rate
+            user.stableBorrowRate = reserve.currentStableBorrowRate;
+            // clears lastVariableBorrowCumulativeIndex to 0
+            user.lastVariableBorrowCumulativeIndex = 0;
+        } else if (_currentRateMode == CoreLibrary.InterestRateMode.STABLE) {
+            // Switch STABLE to VARIABLE
+            // Sets the return value to VARIABLE
+            newMode = CoreLibrary.InterestRateMode.VARIABLE;
+            // Clears stableBorrowRate to 0
+            user.stableBorrowRate = 0;
+            // Snapshots the reserve's current variable borrow index in lastVariableBorrowCumulativeIndex
+            user.lastVariableBorrowCumulativeIndex = reserve.lastVariableBorrowCumulativeIndex;
+        } else {
+            revert LendingPoolCore__InvalidBorrowRateMode();
+        }
+
+        // Compounding cumulated interest
+        user.principalBorrowBalance += _balanceIncrease;
+
+        user.lastUpdateTimestamp = uint40(block.timestamp);
+
+        return newMode;
     }
 
     /////////////////////////////////

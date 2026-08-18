@@ -1814,4 +1814,147 @@ contract LendingPoolIntegrationTest is Test {
         );
         pool.liquidationCall(address(dai), address(weth), user, borrowAmount, false);
     }
+
+    /////////////////////////////////////////////////
+    //              swapBorrowRateMode             //
+    /////////////////////////////////////////////////
+
+    // A stable-rate borrower can switch to the reserve's variable-rate debt
+    // accounting without changing their debt, collateral, or loan fee.
+    function testUserCanSwapStableBorrowRateToVariableRate() external {
+        uint256 depositAmount = 100 ether;
+        uint256 wethLiquidity = 1 ether;
+        uint256 borrowAmount = 0.02 ether;
+        uint256 stableBorrowRate = 0.05e27;
+        uint256 variableBorrowRate = 0.1e27;
+
+        // Configure the strategy to offer 5% stable and 10% variable rates
+        interestRateStrategy.setRates(0, stableBorrowRate, variableBorrowRate);
+
+        // User deposits 100 DAI as collateral
+        vm.startPrank(user);
+        dai.approve(address(core), depositAmount);
+        pool.deposit(address(dai), depositAmount, 0);
+        vm.stopPrank();
+
+        // Second user supplies 1 WETH liquidity
+        weth.mint(secondUser, wethLiquidity);
+        vm.startPrank(secondUser);
+        weth.approve(address(core), wethLiquidity);
+        pool.deposit(address(weth), wethLiquidity, 0);
+        vm.stopPrank();
+
+        // User borrows 0.02 WETH at stable rate
+        vm.prank(user);
+        pool.borrow(address(weth), borrowAmount, uint256(CoreLibrary.InterestRateMode.STABLE), 0);
+
+        uint256 variableBorrowIndex = core.getReserveVariableBorrowsCumulativeIndex(address(weth));
+        uint256 userWethBalanceBeforeSwap = weth.balanceOf(user);
+        uint256 originationFeeBeforeSwap = core.getUserOriginationFee(address(weth), user);
+
+        // User calls swapBorrowRateMode(WETH)
+        vm.expectEmit(true, true, true, true, address(pool));
+        emit LendingPool.Swap(
+            address(weth),
+            user,
+            uint256(CoreLibrary.InterestRateMode.VARIABLE),
+            variableBorrowRate,
+            0,
+            block.timestamp
+        );
+        vm.prank(user);
+        pool.swapBorrowRateMode(address(weth));
+
+        (uint256 principalBorrowBalance, uint256 compoundedBorrowBalance, uint256 borrowBalanceIncrease) =
+            core.getUserBorrowBalances(address(weth), user);
+        assertEq(principalBorrowBalance, borrowAmount); // Unchanged
+        assertEq(compoundedBorrowBalance, borrowAmount); // There is no passage of time so no interest has accrued
+        assertEq(borrowBalanceIncrease, 0); // There is no passage of time so no interest has accrued
+        assertEq(
+            uint256(core.getUserCurrentBorrowRateMode(address(weth), user)),
+            uint256(CoreLibrary.InterestRateMode.VARIABLE)
+        );
+        // User's stableBorrowRate becomes zero -> it's a variable borrow
+        assertEq(core.getUserCurrentStableBorrowRate(address(weth), user), 0);
+        // Snapshots the reserve’s current variable-borrow index for user
+        assertEq(core.getUserVariableBorrowCumulativeIndex(address(weth), user), variableBorrowIndex);
+        // Clears user's totalBorrowsStable
+        assertEq(core.getReserveTotalBorrowsStable(address(weth)), 0);
+        // Pool’s swap logic moves her debt from stable to variable accounting
+        assertEq(core.getReserveTotalBorrowsVariable(address(weth)), borrowAmount);
+        // average stable rate become 0
+        assertEq(core.getReserveCurrentAverageStableBorrowRate(address(weth)), 0);
+        // User's WETH balance is unchanged
+        assertEq(weth.balanceOf(user), userWethBalanceBeforeSwap);
+        // User's origination fee is unchanged.
+        assertEq(core.getUserOriginationFee(address(weth), user), originationFeeBeforeSwap);
+    }
+
+    // A variable-rate borrower can switch to the reserve's current stable rate
+    // when stable borrowing is enabled and the borrowed asset is not collateral.
+    function testUserCanSwapVariableBorrowRateToStableRate() external {
+        uint256 depositAmount = 100 ether;
+        uint256 wethLiquidity = 1 ether;
+        uint256 borrowAmount = 0.02 ether;
+        uint256 stableBorrowRate = 0.05e27;
+        uint256 variableBorrowRate = 0.1e27;
+
+        // COnfigure the mock strategy to offer: 5% stable borrow rate and 10% variable borrow rate
+        interestRateStrategy.setRates(0, stableBorrowRate, variableBorrowRate);
+
+        // User deposits 100 DAI, providing collateral
+        vm.startPrank(user);
+        dai.approve(address(core), depositAmount);
+        pool.deposit(address(dai), depositAmount, 0);
+        vm.stopPrank();
+
+        // Second user supplies 1 WETH, providing WETH liquidity to borrow
+        weth.mint(secondUser, wethLiquidity);
+        vm.startPrank(secondUser);
+        weth.approve(address(core), wethLiquidity);
+        pool.deposit(address(weth), wethLiquidity, 0);
+        vm.stopPrank();
+
+        // User borrows 0.02 WETH in VARIABLE mode
+        vm.prank(user);
+        pool.borrow(address(weth), borrowAmount, uint256(CoreLibrary.InterestRateMode.VARIABLE), 0);
+
+        uint256 userWethBalanceBeforeSwap = weth.balanceOf(user);
+        uint256 originationFeeBeforeSwap = core.getUserOriginationFee(address(weth), user);
+
+        // User calls swapBorrowRateMode(WETH)
+        vm.expectEmit(true, true, true, true, address(pool));
+        emit LendingPool.Swap(
+            address(weth), user, uint256(CoreLibrary.InterestRateMode.STABLE), stableBorrowRate, 0, block.timestamp
+        );
+        vm.prank(user);
+        pool.swapBorrowRateMode(address(weth));
+
+        (uint256 principalBorrowBalance, uint256 compoundedBorrowBalance, uint256 borrowBalanceIncrease) =
+            core.getUserBorrowBalances(address(weth), user);
+        assertEq(principalBorrowBalance, borrowAmount); // unchanged
+        assertEq(compoundedBorrowBalance, borrowAmount); // no interest accrues because there is no passage of time
+        assertEq(borrowBalanceIncrease, 0); // no interest accrues because there is no passage of time
+        assertEq(
+            uint256(core.getUserCurrentBorrowRateMode(address(weth), user)),
+            uint256(CoreLibrary.InterestRateMode.STABLE)
+        );
+        // User's stableBorrowRate = 0.05e27, which is > 0 so it's a STABLE borrow
+        assertEq(core.getUserCurrentStableBorrowRate(address(weth), user), stableBorrowRate);
+        // Variable-borrow index is cleared
+        assertEq(core.getUserVariableBorrowCumulativeIndex(address(weth), user), 0);
+
+        // Reserve accounting moved 0.02 WETH variable debt to 0.02 stable debt
+        assertEq(core.getReserveTotalBorrowsStable(address(weth)), borrowAmount);
+        assertEq(core.getReserveTotalBorrowsVariable(address(weth)), 0);
+
+        // The weighted average stable rate is 0.05e27 because this is the only stable loan
+        assertEq(core.getReserveCurrentAverageStableBorrowRate(address(weth)), stableBorrowRate);
+        
+        // The user's WETH balance did not change
+        assertEq(weth.balanceOf(user), userWethBalanceBeforeSwap);
+        
+        // The user's origination fee did not change
+        assertEq(core.getUserOriginationFee(address(weth), user), originationFeeBeforeSwap);
+    }
 }

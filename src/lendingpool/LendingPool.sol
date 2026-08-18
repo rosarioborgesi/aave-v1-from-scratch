@@ -62,6 +62,8 @@ contract LendingPool is ReentrancyGuard {
     error LendingPool__InvalidETHRepaymentAmount();
     error LendingPool__LiquidationCallFailed();
     error LendingPool__LiquidationFailed(string reason);
+    error LendingPool__NoBorrowInProgress();
+    error LendingPool__UserCannotBorrowAtStable();
 
     //////////////////////////////////
     //      Type declarations       //
@@ -179,6 +181,25 @@ contract LendingPool is ReentrancyGuard {
         address indexed _repayer,
         uint256 _amountMinusFees,
         uint256 _fees,
+        uint256 _borrowBalanceIncrease,
+        uint256 _timestamp
+    );
+
+    /**
+     * @dev emitted when a user performs a rate swap
+     * @param _reserve the address of the reserve
+     * @param _user the address of the user executing the swap
+     * @param _newRateMode the new interest rate mode
+     * @param _newRate the new borrow rate
+     * @param _borrowBalanceIncrease the balance increase since the last action
+     * @param _timestamp the timestamp of the action
+     *
+     */
+    event Swap(
+        address indexed _reserve,
+        address indexed _user,
+        uint256 _newRateMode,
+        uint256 _newRate,
         uint256 _borrowBalanceIncrease,
         uint256 _timestamp
     );
@@ -613,6 +634,62 @@ contract LendingPool is ReentrancyGuard {
         if (returnCode != 0) {
             revert LendingPool__LiquidationFailed(returnMessage);
         }
+    }
+
+    /**
+     * @dev borrowers can user this function to swap between stable and variable borrow rate modes.
+     * @param _reserve the address of the reserve on which the user borrowed
+     *
+     */
+    function swapBorrowRateMode(address _reserve)
+        external
+        nonReentrant
+        onlyActiveReserve(_reserve)
+        onlyUnfreezedReserve(_reserve)
+    {
+        // Read the caller's debt:
+        //   - principalBorrowBalance: debt recorded at the last user action
+        //   - compoundedBorrowbalance: current debt including accrued interest
+        //   - borrowBalanceIncrease: accrued interest since the last action
+        (uint256 principalBorrowBalance, uint256 compoundedBorrowBalance, uint256 borrowBalanceIncrease) =
+            s_core.getUserBorrowBalances(_reserve, msg.sender);
+
+        // The call reverts if the user has no outstanding debt
+        if (compoundedBorrowBalance == 0) {
+            revert LendingPool__NoBorrowInProgress();
+        }
+
+        // Determine the current borrow rate mode:
+        //   - a nonzero stableBorrowrate means stable mode;
+        //   - otherwise the loan is variable mode.
+        CoreLibrary.InterestRateMode currentRateMode = s_core.getUserCurrentBorrowRateMode(_reserve, msg.sender);
+
+        if (currentRateMode == CoreLibrary.InterestRateMode.VARIABLE) {
+            /**
+             * user wants to swap to stable, before swapping we need to ensure that
+             * 1. stable borrow rate is enabled on the reserve
+             * 2. user is not trying to abuse the reserve by depositing
+             * more collateral than he is borrowing, artificially lowering
+             * the interest rate, borrowing at variable, and switching to stable
+             *
+             */
+            if (!s_core.isUserAllowedToBorrowAtStable(_reserve, msg.sender, compoundedBorrowBalance)) {
+                revert LendingPool__UserCannotBorrowAtStable();
+            }
+        }
+
+        // Delegate accounting to LendingPoolCore.updatedStateOnSwapRate
+        (CoreLibrary.InterestRateMode newRateMode, uint256 newBorrowRate) = s_core.updateStateOnSwapRate(
+            _reserve,
+            msg.sender,
+            principalBorrowBalance,
+            compoundedBorrowBalance,
+            borrowBalanceIncrease,
+            currentRateMode
+        );
+
+        // Emit the Swap event
+        emit Swap(_reserve, msg.sender, uint256(newRateMode), newBorrowRate, borrowBalanceIncrease, block.timestamp);
     }
 
     ////////////////////////////////

@@ -273,20 +273,3 @@ The `Repay` event identifies both the borrower (`_onBehalfOf`) and payer
 `_borrowBalanceIncrease` field records the interest materialized by the
 operation.
 
-## Repay Order
-
-```text
-validate active reserve and nonzero amount
-        ↓
-read compounded debt, accrued interest, and outstanding fee
-        ↓
-resolve full or partial payment; validate ETH value
-        ↓
-allocate payment to fee first, then debt
-        ↓
-LendingPoolCore materializes interest, updates borrower and reserve state, and reprices rates
-        ↓
-send fee to token distributor and debt portion to reserve liquidity
-        ↓
-emit Repay
-```

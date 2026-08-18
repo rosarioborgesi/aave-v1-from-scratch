@@ -2181,3 +2181,83 @@ function liquidateFee(
 This function sends collateral reserved for a liquidated origination fee from `LendingPoolCore` to the protocol fee collector. Before it is called, the liquidation manager burns the borrower's aTokens for the same collateral amount, keeping the aToken supply aligned with the underlying assets that leave the pool.
 
 For ERC20 collateral, the core uses `safeTransfer(_destination, _amount)`. For ETH collateral, it sends `_amount` with a low-level call and reverts with `LendingPoolCore__EthTransferFailed` if the transfer fails. The function transfers funds only; the borrower’s outstanding fee was already reduced by `_updateUserStateOnLiquidation()`.
+
+# Swap Borrow Rate State Update
+
+Borrowers can switch an existing loan between the stable and variable rate modes without borrowing or repaying underlying funds. A rate swap first realizes the interest already accrued by that borrower, then moves the resulting debt between the reserve's stable and variable debt aggregates.
+
+## `updateStateOnSwapRate`
+
+```solidity
+function updateStateOnSwapRate(
+    address _reserve,
+    address _user,
+    uint256 _principalBorrowBalance,
+    uint256 _compoundedBorrowBalance,
+    uint256 _balanceIncrease,
+    CoreLibrary.InterestRateMode _currentRateMode
+) external onlyLendingPool returns (CoreLibrary.InterestRateMode, uint256)
+```
+
+This is the core accounting entry point for a rate swap validated by `LendingPool`. No underlying tokens move, so the reserve's available liquidity is unchanged. The function trusts the caller's supplied balances and current mode.
+
+Its sequence is:
+
+```text
+1. Checkpoint reserve indexes and move the borrower's debt to the opposite aggregate.
+2. Materialize the borrower's accrued interest and replace their rate-mode state.
+3. Recalculate reserve rates with zero liquidity added and zero liquidity taken.
+4. Return the new rate mode and the borrower's current rate in that mode.
+```
+
+`_principalBorrowBalance` is the debt recorded at the borrower's previous checkpoint. `_compoundedBorrowBalance` is that debt plus accrued interest, and `_balanceIncrease` is the difference between them. Passing both values lets reserve totals move the full current debt while the user's principal is updated by only the accrued increment.
+
+## `_updateReserveStateOnSwapRate`
+
+```solidity
+function _updateReserveStateOnSwapRate(
+    address _reserve,
+    address _user,
+    uint256 _principalBorrowBalance,
+    uint256 _compoundedBorrowBalance,
+    CoreLibrary.InterestRateMode _currentRateMode
+) internal
+```
+
+This helper updates reserve-wide accounting. It first calls `updateCumulativeIndexes()`, recording liquidity-index and variable-borrow-index growth under the rates that existed before the swap.
+
+It then removes the user's old checkpointed principal from their current aggregate and adds their interest-inclusive debt to the destination aggregate:
+
+```text
+source aggregate      -= principalBorrowBalance
+destination aggregate += compoundedBorrowBalance
+```
+
+For a stable-to-variable swap, it removes principal from `totalBorrowsStable` using the user's existing `stableBorrowRate`, which also updates the reserve's weighted average stable rate. It adds `compoundedBorrowBalance` to `totalBorrowsVariable`.
+
+For a variable-to-stable swap, it removes principal from `totalBorrowsVariable` and adds `compoundedBorrowBalance` to `totalBorrowsStable` at `reserve.currentStableBorrowRate`, updating the weighted average stable rate. `NONE` or any unsupported mode reverts with `LendingPoolCore__InvalidBorrowRateMode`.
+
+The difference between the removed and added amounts is the borrower's accrued interest, which is materialized into the destination debt total rather than lost during the mode change.
+
+## `_updateUserStateOnSwapRate`
+
+```solidity
+function _updateUserStateOnSwapRate(
+    address _reserve,
+    address _user,
+    uint256 _balanceIncrease,
+    CoreLibrary.InterestRateMode _currentRateMode
+) internal returns (CoreLibrary.InterestRateMode)
+```
+
+This helper writes the borrower's new rate-specific state and returns the resulting mode.
+
+For a variable-to-stable swap, it sets `stableBorrowRate` to the reserve's current stable borrow rate and clears `lastVariableBorrowCumulativeIndex`. For a stable-to-variable swap, it clears `stableBorrowRate` and snapshots the reserve's current `lastVariableBorrowCumulativeIndex`; remaining variable debt will accrue from that checkpoint forward.
+
+In both cases, it realizes accrued interest in the user record:
+
+```text
+new principalBorrowBalance = old principalBorrowBalance + balanceIncrease
+```
+
+Finally, it sets `lastUpdateTimestamp` to `block.timestamp`. As in the reserve helper, an invalid current mode reverts.

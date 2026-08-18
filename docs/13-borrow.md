@@ -300,15 +300,44 @@ pool's constructor reads the first four dependency addresses; the data provider
 uses `getPriceOracle()` while calculating account values and required
 collateral.
 
-## Result
+## Complete Borrow Example
 
-After a successful borrow:
+Assume Alice has already supplied enough collateral, the DAI reserve has more
+than `100 DAI` of available liquidity, and the fee provider calculates a
+`0.1 DAI` origination fee. Alice has no previous DAI debt and chooses the
+variable rate with referral code `0`:
 
-- the user receives the requested underlying asset;
-- principal debt increases by the requested amount plus any previously accrued
-  interest;
-- the user's origination-fee balance increases by the new fee;
-- the reserve's available liquidity decreases by the borrowed amount;
-- the selected stable or variable reserve borrow total increases; and
-- reserve interest rates and cumulative-index timestamps are updated for the
-  new utilization.
+```solidity
+lendingPool.borrow(
+    DAI,
+    100 ether,
+    uint256(CoreLibrary.InterestRateMode.VARIABLE),
+    0
+);
+```
+
+```text
+1. The pool validates that the DAI reserve is active, unfrozen, enabled for borrowing, and sufficiently liquid.
+2. The data provider confirms that Alice has collateral, a healthy position, and enough borrowing capacity for 100.1 DAI of debt and fees.
+3. The fee provider calculates and records a 0.1 DAI origination fee.
+4. The core checkpoints the reserve indexes and adds 100 DAI to total variable borrows.
+5. Alice's principal debt becomes 100 DAI and her variable-borrow index is checkpointed.
+6. The core recalculates reserve rates as though 100 DAI has left available liquidity.
+7. LendingPoolCore transfers 100 DAI to Alice.
+8. The pool emits Borrow with mode VARIABLE, the final variable rate, a 0.1 DAI fee, and zero prior-interest increase.
+```
+
+After the transaction:
+
+```text
+Alice's DAI balance increase       = 100 DAI
+Alice's principal DAI debt         = 100 DAI
+Alice's DAI origination fee        = 0.1 DAI
+reserve available-liquidity change = -100 DAI
+reserve variable-borrow change     = +100 DAI
+```
+
+The `Borrow` event's `_amount` field is the full `100 DAI` sent to Alice.
+The fee is reported separately in `_originationFee`, and
+`_borrowBalanceIncrease` is zero because this is Alice's first DAI borrow and
+there was no existing debt on which interest could accrue.

@@ -1546,3 +1546,114 @@ The liquidator pays `0.01 WETH`, not `0.02 WETH`. With
 `_receiveAToken = true`, they receive `42 aDAI`. Any liquidatable origination
 fee uses additional collateral left after those `42 DAI` and is sent to the
 protocol's token distributor.
+
+
+# Swapping Borrow Rate Modes
+
+## `swapBorrowRateMode`
+
+```solidity
+function swapBorrowRateMode(address _reserve)
+    external
+    nonReentrant
+    onlyActiveReserve(_reserve)
+    onlyUnfreezedReserve(_reserve)
+```
+
+`swapBorrowRateMode()` lets a borrower move an existing loan from variable to
+stable interest, or from stable to variable interest. It changes debt
+accounting and the rate applied going forward; it neither transfers underlying
+assets nor changes the borrowed amount apart from materializing interest that
+has already accrued.
+
+The call is protected against reentrancy and requires the reserve to be active
+and not frozen. Unlike repayment and liquidation, a frozen reserve cannot have
+its borrowers open a new rate position through a swap.
+
+The pool first reads the caller's debt from the core:
+
+```solidity
+(
+    uint256 principalBorrowBalance,
+    uint256 compoundedBorrowBalance,
+    uint256 borrowBalanceIncrease
+) = s_core.getUserBorrowBalances(_reserve, msg.sender);
+```
+
+These values distinguish the debt at the previous user checkpoint from the
+current interest-inclusive debt:
+
+```text
+principalBorrowBalance  debt recorded at the last debt update
+compoundedBorrowBalance principal plus interest accrued since that update
+borrowBalanceIncrease   compoundedBorrowBalance - principalBorrowBalance
+```
+
+If `compoundedBorrowBalance` is zero, the caller has no loan to swap and the
+function reverts with `LendingPool__NoBorrowInProgress`.
+
+## Variable-to-Stable Validation
+
+The current mode comes from:
+
+```solidity
+s_core.getUserCurrentBorrowRateMode(_reserve, msg.sender)
+```
+
+When it is `VARIABLE`, the requested destination is stable, so the pool calls:
+
+```solidity
+s_core.isUserAllowedToBorrowAtStable(
+    _reserve,
+    msg.sender,
+    compoundedBorrowBalance
+)
+```
+
+This verifies that stable borrowing is enabled for the reserve and applies the
+same-asset collateral restriction. In particular, it prevents a user from
+using a large deposit of the borrowed asset as collateral to influence reserve
+conditions, borrow at variable rate, and then lock in a stable rate. A failed
+check reverts with `LendingPool__UserCannotBorrowAtStable`.
+
+No equivalent stable-rate eligibility check is required for a stable-to-variable
+swap. The special validation exists only because the destination rate is
+stable.
+
+## Core Accounting and Event
+
+After validation, the pool delegates the accounting work to the core:
+
+```solidity
+(CoreLibrary.InterestRateMode newRateMode, uint256 newBorrowRate) =
+    s_core.updateStateOnSwapRate(
+        _reserve,
+        msg.sender,
+        principalBorrowBalance,
+        compoundedBorrowBalance,
+        borrowBalanceIncrease,
+        currentRateMode
+    );
+```
+
+`LendingPoolCore` checkpoints indexes, moves the interest-inclusive debt from
+the old reserve-wide debt aggregate to the new one, updates the user's mode and
+rate checkpoint, and recalculates reserve rates. See the LendingPoolCore swap
+rate documentation for the detailed accounting flow.
+
+Finally, the pool emits:
+
+```solidity
+Swap(
+    _reserve,
+    msg.sender,
+    uint256(newRateMode),
+    newBorrowRate,
+    borrowBalanceIncrease,
+    block.timestamp
+);
+```
+
+The event exposes the selected new mode and rate, plus the interest that was
+realized at the swap. This lets indexers reconstruct the rate transition
+without treating the operation as a transfer of borrowed funds.

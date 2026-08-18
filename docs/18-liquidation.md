@@ -283,22 +283,4 @@ lendingPool.liquidationCall(DAI, WETH, borrower, 0.02 ether, false);
 With `_receiveAToken = true`, step 5 transfers `42 aDAI` instead and the
 underlying DAI remains in the core.
 
-## Liquidation Order
 
-```text
-validate active debt and collateral reserves
-        ↓
-delegate to the liquidation manager
-        ↓
-validate health, collateral configuration, and debt
-        ↓
-cap repayment at 50% of compounded debt
-        ↓
-price liquidator collateral and reduce repayment if it is insufficient
-        ↓
-calculate collateral for any origination fee
-        ↓
-check liquidity for underlying collateral
-        ↓
-update accounting; settle collateral, repayment, fee, and events
-```

@@ -319,7 +319,6 @@ contract LendingPoolLiquidationManager is ReentrancyGuard {
             vars.borrowBalanceIncrease,
             msg.sender,
             _receiveAToken,
-            //solium-disable-next-line
             block.timestamp
         );
 

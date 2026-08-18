@@ -399,42 +399,6 @@ Required function:
 - `SafeERC20.safeTransfer()` returns ERC20 reserves from the core.
 - `Ownable.onlyOwner` protects address-provider setters.
 
-## Required Setup Before Redeem
-
-Redeem builds on the deposit setup. The data provider must be registered before
-the aToken is deployed because the aToken constructor resolves it immediately.
-
-Minimum setup order:
-
-1. Deploy `LendingPoolAddressesProvider`.
-2. Deploy `LendingPoolCore` with the addresses provider.
-3. Register the core with `setLendingPoolCore()`.
-4. Deploy `LendingPool` with the addresses provider.
-5. Register the pool with `setLendingPool()`.
-6. Deploy `LendingPoolDataProvider` with the addresses provider.
-7. Register the data provider with `setLendingPoolDataProvider()`.
-8. Deploy and register a price oracle with `setPriceOracle()` when collateral
-   health-factor calculations are in scope.
-9. Register the lending pool configurator.
-10. Deploy the reserve token and its matching aToken.
-11. Deploy or select an interest rate strategy.
-12. Initialize the reserve in `LendingPoolCore`.
-13. Deposit underlying liquidity so the user owns aTokens and the core has
-    assets available to return.
-14. Call `aToken.redeem(amount)` as the aToken holder.
-
-The critical registration order is:
-
-```text
-register core
-    -> deploy pool and data provider
-register pool and data provider
-    -> deploy aToken
-```
-
-An oracle is not consulted when the reserve cannot be used as collateral or the
-user has not enabled it as collateral. For a collateral reserve with debt, each
-relevant reserve must have a valid oracle price.
 
 ## `AToken.redeem()` Execution
 
@@ -660,21 +624,4 @@ Because the transaction is atomic, none of the aToken balance, index,
 redirection, collateral, reserve-rate, or underlying balance changes persist
 after a revert.
 
-## Integration Test Scenario
 
-`ATokenIntegrationTest.testUserCanDepositAndRedeemUnderlying()` covers the
-implemented ERC20 path:
-
-1. Mint `100 DAI` to the user.
-2. Approve the core and deposit `100 DAI`.
-3. Redeem `40 aDAI` through `AToken.redeem()`.
-4. Assert that the user receives `40 DAI`.
-5. Assert that the core and user each retain the expected `60` balances.
-6. Assert that reserve available liquidity is `60 DAI`.
-7. Assert that the user index remains `1 ray`.
-8. Assert that a partial redemption keeps the user's collateral flag enabled.
-
-The unit tests separately cover the data-provider health-factor branches, core
-rate and collateral updates, ERC20 and ETH transfers, and pool authorization
-and reentrancy checks. Direct `AToken.redeem()` validation remains an area for
-additional unit coverage.
