@@ -2261,3 +2261,51 @@ new principalBorrowBalance = old principalBorrowBalance + balanceIncrease
 ```
 
 Finally, it sets `lastUpdateTimestamp` to `block.timestamp`. As in the reserve helper, an invalid current mode reverts.
+
+# Flash-Loan State Update
+
+When a flash loan completes, `LendingPool` first verifies that `LendingPoolCore` received back the principal plus exactly the total flash-loan fee. It then calls the functions below to split that fee between the protocol and the reserve's suppliers.
+
+## `updateStateOnFlashLoan`
+
+```solidity
+function updateStateOnFlashLoan(
+    address _reserve,
+    uint256 _avaliableLiquidityBefore,
+    uint256 _income,
+    uint256 _protocolFee
+) external onlyLendingPool
+```
+
+This is the flash-loan settlement accounting entry point. Only `LendingPool` can call it, and it relies on that caller to have validated the repayment and calculated the fee split.
+
+`_avaliableLiquidityBefore` is the core's underlying-token balance immediately before the loan was sent. `_protocolFee` is the portion of the fee that belongs to the protocol, while `_income` is the remaining portion for aToken holders.
+
+The function performs these updates in order:
+
+```text
+1. Transfer _protocolFee from the core to TokenDistributor.
+2. Checkpoint time-based liquidity and variable-borrow index growth.
+3. Distribute _income to suppliers by increasing the liquidity index.
+4. Recalculate the reserve's interest rates and record the new timestamp.
+```
+
+For the one-off supplier distribution, it uses the reserve value before the flash-loan income was added:
+
+```text
+totalLiquidityBefore = _avaliableLiquidityBefore + total outstanding borrows
+```
+
+Calling `cumulateToLiquidityIndex(totalLiquidityBefore, _income)` raises the shared liquidity index, so each aToken holder receives a proportional claim on the supplier share without an individual balance update. The final rate update calls `_updateReserveInterestRatesAndTimestamp(_reserve, _income, 0)`.
+
+## `_transferFlashLoanProtocolFee`
+
+```solidity
+function _transferFlashLoanProtocolFee(address _token, uint256 _amount) internal
+```
+
+This internal helper moves the protocol's portion of a flash-loan fee from `LendingPoolCore` to the current `TokenDistributor` address returned by `LendingPoolAddressesProvider`.
+
+For an ERC20 reserve, it uses `IERC20(_token).safeTransfer(receiver, _amount)`. For the ETH reserve, it sends `_amount` with a low-level call. If that ETH transfer fails, the whole flash-loan settlement reverts with `LendingPoolCore__EthTransferFailed(receiver, _amount)`.
+
+The helper only transfers the protocol share. The separate `_income` amount remains associated with the reserve and is distributed to suppliers by `updateStateOnFlashLoan`.

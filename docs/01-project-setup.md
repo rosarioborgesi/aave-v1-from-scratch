@@ -17,11 +17,14 @@ We use OpenZeppelin for standard ERC20 contracts.
 forge install OpenZeppelin/openzeppelin-contracts
 ```
 
-## Remappings
+## Foundry Configuration
 
-Add the OpenZeppelin remapping in foundry.toml:
+The project uses Solidity `0.8.30`. The `foundry.toml` file also defines the
+OpenZeppelin remapping used by imports throughout the contracts:
 
 ```text
+solc_version = "0.8.30"
+
 remappings = [
   "openzeppelin-contracts/=lib/openzeppelin-contracts/contracts/"
 ]
@@ -30,17 +33,23 @@ remappings = [
 ## Structure
 
 ```text
-src/contracts
-        ├──tokenization/AToken.sol
-        ├── lendingpool/LendingPool.sol
+src/
+├── configuration/  # Address and protocol-parameter configuration
+├── flashloan/      # Flash-loan receiver base contract and interface
+├── interfaces/     # Interfaces for protocol dependencies
+├── lendingpool/    # User flows and reserve accounting
+├── libraries/      # Fixed-point math and core accounting helpers
+└── tokenization/   # Interest-bearing aToken implementation
 
 test/
-└── LendingPoolTest.t.sol
+├── integration/    # End-to-end protocol-flow tests
+├── mocks/          # Test doubles for tokens, oracles, and providers
+└── unit/           # Focused contract and library tests
 
 docs/
 ├── 00-introduction.md
 ├── 01-project-setup.md
-└── 02-deposit.md
+├── 01-protocol-architecture.md
+├── ...
+└── 21-flash-loan.md
 ```
-
-// TODO must be reviewed

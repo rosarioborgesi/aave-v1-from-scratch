@@ -1907,3 +1907,104 @@ add 1 wei of debt.
 ```
 
 The reason is to avoid interest-free loans caused by rounding.
+
+
+## `cumulateToLiquidityIndex`
+
+```solidity
+function cumulateToLiquidityIndex(
+    ReserveData storage _self,
+    uint256 _totalLiquidity,
+    uint256 _amount
+) internal
+```
+
+`cumulateToLiquidityIndex` distributes a one-off income amount among all
+suppliers by immediately increasing the reserve's liquidity index. Unlike
+`updateCumulativeIndexes`, it does not use a rate, a timestamp, or elapsed
+time.
+
+The current flash-loan settlement path uses it to distribute the income portion
+of a flash-loan fee to aToken holders.
+
+### Inputs
+
+* `_self` is the reserve whose `lastLiquidityCumulativeIndex` will be updated.
+* `_totalLiquidity` is the reserve's total value **before** the new income is
+  added. In the flash-loan path, it is the available liquidity held by
+  `LendingPoolCore` plus outstanding borrows.
+* `_amount` is the income to distribute, expressed in the underlying token's
+  native decimals.
+
+Using the pre-income total is important: it defines the balances that owned the
+reserve when the income was earned.
+
+### Formula
+
+The function calculates an income ratio and turns it into an index multiplier:
+
+```text
+incomeRatio = amount / totalLiquidity
+multiplier  = 1 + incomeRatio
+newIndex    = previousIndex × multiplier
+```
+
+Equivalently:
+
+$$
+\text{newIndex}
+=
+\text{previousIndex}
+\times
+\left(1 + \frac{\text{amount}}{\text{totalLiquidity}}\right)
+$$
+
+The implementation is:
+
+```solidity
+uint256 amountToLiquidityRatio =
+    _amount.wadToRay().rayDiv(_totalLiquidity.wadToRay());
+
+uint256 cumulatedLiquidity = amountToLiquidityRatio + WadRayMath.ray();
+
+_self.lastLiquidityCumulativeIndex =
+    cumulatedLiquidity.rayMul(_self.lastLiquidityCumulativeIndex);
+```
+
+`wadToRay` converts each token amount from wad-scale representation to ray
+precision; because both numerator and denominator are converted, their ratio is
+unchanged. `rayDiv` and `rayMul` perform the fixed-point division and
+multiplication in ray precision (`1e27`), with the rounding rules defined in
+`WadRayMath`.
+
+### Example
+
+Suppose the reserve has total liquidity of `1,000 DAI` before a flash loan, its
+liquidity index is `1.00`, and it receives `10 DAI` of distributable income.
+
+```text
+incomeRatio = 10 / 1,000 = 0.01
+multiplier  = 1 + 0.01 = 1.01
+newIndex    = 1.00 × 1.01 = 1.01
+```
+
+In ray precision:
+
+```text
+previousIndex = 1e27
+multiplier    = 1.01e27
+newIndex      = 1.01e27
+```
+
+Every supplier's balance is derived from this shared index, so each balance
+increases by 1%. For example, a supplier whose aToken balance represented
+`100 DAI` before the update is entitled to approximately `101 DAI` afterward.
+No individual supplier balance needs to be written to storage.
+
+### Preconditions and Boundaries
+
+`_totalLiquidity` must be nonzero. Otherwise, `rayDiv` reverts with
+`WadRayMath__DivisionByZero`; there is no existing supplier liquidity over
+which to distribute the income. The function also assumes `_amount` is the
+portion intended for suppliers—any protocol fee must be removed before calling
+it.

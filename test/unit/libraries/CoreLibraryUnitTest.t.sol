@@ -218,7 +218,7 @@ contract CoreLibraryUnitTest is Test {
     // linearInterest = 1 ray + rate * elapsedTime / secondsPerYear
 
     // 1. No Time Passed
-    function testCalculateLinearInterestReturnsOneRayIfNoTimePassed() external {
+    function testCalculateLinearInterestReturnsOneRayIfNoTimePassed() external view {
         uint256 rate = 5e25; // 5% expressed in ray
         uint40 lastUpdateTimestamp = uint40(block.timestamp);
 
@@ -300,7 +300,7 @@ contract CoreLibraryUnitTest is Test {
     // compoundedInterest = (1 ray + rate / SECONDS_PER_YEAR) ^ elapsedTime
 
     // 1. No time passed
-    function testCalculateCompoundedInterestReturnsOneRayIfNoTimePassed() external {
+    function testCalculateCompoundedInterestReturnsOneRayIfNoTimePassed() external view {
         uint256 rate = 5e25; // 5% expressed in ray
         uint40 lastUpdateTimestamp = uint40(block.timestamp);
 

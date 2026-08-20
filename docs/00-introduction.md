@@ -1,31 +1,67 @@
 # Aave V1 From Scratch
 
-The goal of this project is to rebuild the core ideas of Aave V1 from scratch using Solidity and Foundry.
+This project is an educational rebuild of the core ideas behind Aave V1. Its
+purpose is to make the internal mechanics of a lending protocol easier to
+understand by implementing them one component and one user flow at a time.
 
-This is not a production-ready implementation. The goal is educational: to understand how a lending protocol works by implementing one feature at a time and writing tests for each step.
+It is not a line-by-line copy of the original contracts. The original Aave V1
+code is used as a reference, while this repository rewrites and documents the
+important concepts with modern Solidity, Foundry, and extensive tests.
 
-Aave V1 is based on a pool-based lending model. Users deposit assets into a shared pool, and other users can borrow from that pool by providing collateral.
+> **Warning:** This is a learning project, not a production-ready lending
+> protocol. It has not been audited and must not be used with real funds.
 
-In the original Aave V1 architecture, the main user-facing contract is the `LendingPool`. Users interact with it to deposit, redeem, borrow, repay, swap rates, liquidate positions, and use flash loans.
+## What This Project Is Trying to Teach
 
-In this project, we will start with the simplest possible flow:
+A lending protocol can look like a large collection of contracts, formulas,
+indexes, and token transfers. The goal of this repository is to show how those
+pieces work together by answering questions such as:
 
-```text
-User deposits ERC20 tokens
-User receives aTokens
-```
-// TODO complete
+- Where do deposited assets go?
+- Why does a depositor receive aTokens?
+- How does an aToken balance earn interest without updating every account?
+- How are stable and variable borrow balances calculated over time?
+- How do LTV, liquidation thresholds, and health factors limit borrowing?
+- What happens to the reserve when a user deposits, borrows, repays, or
+  redeems?
+- How does liquidation reduce an unhealthy position?
+- How can a flash loan be issued and repaid within one transaction?
 
-## NOTE on changes from the original version of the protocol
-With respect to the original version of the protocl I have chosen to not use the proxy patter that is used for the contract replacing the initialize method with a simple constructor and to remove the redirection of interest from the AToken that has been deprecated in newver version of AAve V2 because it only made harder to udnerstand the function of the contract.
+## How the Repository Approaches Learning
 
-Furthemore also the stable rate borrowing has been depreacted on the newver version but I chose to keep it because there is the swap rate feature
+The project is built in layers. It begins with fixed-point arithmetic and
+reserve data structures, then introduces index-based interest accounting,
+aTokens, account valuation, and complete lending operations.
 
-I decided to use modern solidity 0.8.30 and to build it with Foundry instead of Hardhat.
-Using modern day solidity means that we don't need SafeMath anymore because the uint256 now handles the overflow, underflow by default.
+There are two complementary kinds of tests:
 
-I have also chosen to replace require with if + reverts and custom errors because this is a good practise as it consumes less gas.
+- **Unit tests** isolate formulas and individual state transitions so that each
+  function can be understood independently.
+- **Integration tests** execute complete flows across several contracts and
+  verify the resulting balances, debt, fees, indexes, rates, and events.
 
-Obviously some changes are required when using newver version of Open Zeppelin contracts (v5.6.1) that are different from the original (v. 2.3.0)
+The documentation follows the same approach. Concept pages explain the
+mathematics and data model, while flow pages trace operations such as deposit,
+borrow, repay, liquidation, and flash loan from beginning to end.
 
-I have also tried to write as many unit tests as possible to understan how each single function works as well as integration tests to undertsand how the contracts work together and to undertsnad how the overall operations of deposit, redeem, borrow, etc. work.
+## Differences From the Original Aave V1
+
+The intention is to preserve the important Aave V1 mechanics while removing
+historical complexity that is not necessary for learning. The main differences
+are listed below.
+
+| Area | Original Aave V1 | This project | Reason |
+| --- | --- | --- | --- |
+| Deployment | Upgradeable contracts initialized through a proxy | Contracts use constructors and are deployed directly | Direct deployment makes initialization and contract relationships easier to follow |
+| Solidity | An older Solidity version | Solidity `0.8.30` | Uses current language features and compiler checks |
+| Development tools | The original repository used the tooling of its time | Foundry is used for building and testing | Provides a fast, Solidity-native test workflow |
+| Arithmetic safety | `SafeMath` was required | Native checked arithmetic is used | Solidity 0.8 reverts on integer overflow and underflow by default |
+| Revert handling | Mostly `require` statements and revert strings | `if` statements with custom errors | Makes failure cases explicit and reduces revert-data gas costs |
+| OpenZeppelin | OpenZeppelin Contracts `2.3.0` | OpenZeppelin Contracts `5.6.1` | Adapts the implementation to modern library APIs and security utilities |
+| aToken interest redirection | A deposit's accrued interest could be redirected to another address | Interest redirection is omitted | It adds substantial accounting complexity and was later removed from Aave |
+| Stable-rate borrowing | Present in Aave V1 | Retained | It is needed to study stable debt accounting and the borrow-rate swap flow |
+
+## Suggested Reading
+
+The original Aave V1 source remains a valuable companion reference:
+[aave/aave-protocol](https://github.com/aave/aave-protocol).

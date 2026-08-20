@@ -1657,3 +1657,63 @@ Swap(
 The event exposes the selected new mode and rate, plus the interest that was
 realized at the swap. This lets indexers reconstruct the rate transition
 without treating the operation as a transfer of borrowed funds.
+
+# Flash Loans
+
+## `flashLoan`
+
+```solidity
+function flashLoan(address _receiver, address _reserve, uint256 _amount, bytes memory _params) external
+```
+
+`flashLoan()` lends reserve liquidity to a receiver contract for the remainder
+of the current transaction. The receiver implements `IFlashLoanReceiver` and
+uses its callback to perform its operation. Before that callback returns, it
+must restore the borrowed principal and pay the flash-loan fee; otherwise the
+whole transaction reverts.
+
+The function is `nonReentrant`, requires an active reserve, and rejects a zero
+loan amount. It reads the Core's actual ETH or ERC-20 balance before the loan
+instead of its accounting-level available-liquidity value. This is both cheaper
+and supplies the balance baseline used to prove repayment. If that balance is
+smaller than `_amount`, the call reverts.
+
+The parameters provider supplies the total and protocol fee rates in basis
+points. The pool calculates them as:
+
+```solidity
+amountFee = _amount * totalFeeBips / 10_000;
+protocolFee = amountFee * protocolFeeBips / 10_000;
+```
+
+Both calculated values must be nonzero. This prevents very small loans from
+rounding their total fee or protocol share down to zero.
+
+After transferring `_amount` from `LendingPoolCore` to `_receiver`, the pool
+calls:
+
+```solidity
+receiver.executeOperation(_reserve, _amount, amountFee, _params);
+```
+
+`_params` is arbitrary data forwarded to the receiver, allowing a receiver to
+configure its own transaction-specific operation. The receiver is responsible
+for transferring the principal plus `amountFee` back to the Core during this
+callback.
+
+On return, the pool enforces an exact balance invariant:
+
+```text
+coreBalanceAfter == coreBalanceBefore + amountFee
+```
+
+Thus the principal must have been returned and the Core must have earned
+exactly the quoted fee. A short repayment, an overpayment, or any other
+unexpected Core balance change reverts with
+`LendingPool__InconsistentProtocolBalance`.
+
+Finally, `updateStateOnFlashLoan()` sends `protocolFee` to the token
+distributor, credits the remaining fee to the reserve liquidity index for
+aToken holders, and refreshes reserve rates and timestamps. The pool then
+emits `FlashLoan`, recording the receiver, reserve, amount, total fee,
+protocol fee, and timestamp.

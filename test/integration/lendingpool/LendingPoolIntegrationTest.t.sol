@@ -5,6 +5,7 @@ import {Test, console} from "forge-std/Test.sol";
 
 import {MockERC20} from "../../mocks/MockERC20.sol";
 import {MockFeeProvider} from "../../mocks/MockFeeProvider.sol";
+import {MockFlashLoanReceiver} from "../../mocks/MockFlashLoanReceiver.sol";
 import {MockPriceOracle} from "../../mocks/MockPriceOracle.sol";
 import {MockReserveInterestRateStrategy} from "../../mocks/MockReserveInterestRateStrategy.sol";
 
@@ -17,6 +18,7 @@ import {LendingPoolDataProvider} from "src/lendingpool/LendingPoolDataProvider.s
 import {LendingPoolParametersProvider} from "src/configuration/LendingPoolParametersProvider.sol";
 import {LendingPoolLiquidationManager} from "src/lendingpool/LendingPoolLiquidationManager.sol";
 import {CoreLibrary} from "src/libraries/CoreLibrary.sol";
+import {ILendingPoolAddressesProvider} from "src/interfaces/ILendingPoolAddressesProvider.sol";
 
 contract LendingPoolCoreHarness is LendingPoolCore {
     constructor(address addressesProvider) LendingPoolCore(addressesProvider) {}
@@ -1855,12 +1857,7 @@ contract LendingPoolIntegrationTest is Test {
         // User calls swapBorrowRateMode(WETH)
         vm.expectEmit(true, true, true, true, address(pool));
         emit LendingPool.Swap(
-            address(weth),
-            user,
-            uint256(CoreLibrary.InterestRateMode.VARIABLE),
-            variableBorrowRate,
-            0,
-            block.timestamp
+            address(weth), user, uint256(CoreLibrary.InterestRateMode.VARIABLE), variableBorrowRate, 0, block.timestamp
         );
         vm.prank(user);
         pool.swapBorrowRateMode(address(weth));
@@ -1950,11 +1947,58 @@ contract LendingPoolIntegrationTest is Test {
 
         // The weighted average stable rate is 0.05e27 because this is the only stable loan
         assertEq(core.getReserveCurrentAverageStableBorrowRate(address(weth)), stableBorrowRate);
-        
+
         // The user's WETH balance did not change
         assertEq(weth.balanceOf(user), userWethBalanceBeforeSwap);
-        
+
         // The user's origination fee did not change
         assertEq(core.getUserOriginationFee(address(weth), user), originationFeeBeforeSwap);
+    }
+
+    ////////////////////////////////////
+    //           flashLoan            //
+    ////////////////////////////////////
+
+    // Demonstrates the complete happy path of an ERC-20 flash loan.
+    function testFlashLoanReturnsPrincipalAndDistributesFee() external {
+        uint256 reserveLiquidity = 100 ether;
+        uint256 flashLoanAmount = 10 ether;        
+        uint256 totalFee = flashLoanAmount * 35 / 10_000;        
+        uint256 protocolFee = totalFee * 3000 / 10_000;
+        uint256 depositorFee = totalFee - protocolFee;
+        MockFlashLoanReceiver receiver = new MockFlashLoanReceiver(ILendingPoolAddressesProvider(address(addressesProvider)));
+
+        // Gives the pool core 100 DAI as available liquidity
+        dai.mint(address(core), reserveLiquidity);
+
+        vm.expectEmit(true, true, true, true, address(receiver));
+        emit MockFlashLoanReceiver.ExecutedWithSuccess(address(dai), flashLoanAmount, totalFee);
+        vm.expectEmit(true, true, true, true, address(pool));
+        emit LendingPool.FlashLoan(address(receiver), address(dai), flashLoanAmount, totalFee, protocolFee, block.timestamp);
+
+        // It requires a flash loan of 10 DAI through a MockFlashLoanReceiver.
+        pool.flashLoan(address(receiver), address(dai), flashLoanAmount, bytes(""));
+
+        // The receiver starts with 0 DAI, then during the flash loan:
+        //     1. It receives 10 DAI from the core
+        //     2. It mints 0.035 DAI, the required fee
+        //     3. It returns its netire 10.035 DAI balace to the core.
+        // It ends with 0 DAI again. Afterward, the core forwards 0.0105 DAI of that fee to the fee collector,
+        // retaining 0.0245 for depositors.
+
+        // Total flash-loan fee: 0.25 % of 10 DAI = 0.035 DAI
+        // Protocol share: 30% of Total flash-loan fee = 0.0105 DAI
+        // Depositor share = 0.035 DAI - 0.0105 DAI = 0.0245 DAI
+
+        // The receiver has repaid the principal plus the fee, leaving it with no DAI.
+        assertEq(dai.balanceOf(address(receiver)), 0, "receiver repays principal plus fee");
+
+        // The fee collector receives the protocol's share of the fee: 0.0105 DAI.
+        assertEq(dai.balanceOf(feeCollector), protocolFee, "fee collector receives protocol fee");
+
+        // The core now holds 100.0245 DAI: its initial 100 DAI plus the depositors' share of the fee.
+        assertEq(
+            dai.balanceOf(address(core)), reserveLiquidity + depositorFee, "core retains depositor share of the fee"
+        );
     }
 }

@@ -53,28 +53,6 @@ on the `LendingPool`.
 
 The `LendingPool` does not hold all the protocol state itself. Instead, it coordinates the action by calling other contracts.
 
-For a deposit, the flow is:
-
-```text
-User
-  |
-  | deposit()
-  v
-LendingPool
-  |
-  | update reserve state
-  v
-LendingPoolCore
-  |
-  | mint aTokens
-  v
-AToken
-  |
-  | transfer underlying asset
-  v
-LendingPoolCore
-```
-
 So `LendingPool` is user-facing, but it is not the place where all the funds and reserve data are stored.
 
 ## Core State Layer
@@ -446,31 +424,3 @@ address core = getAddress(LENDING_POOL_CORE);
 ```
 
 So `AddressStorage` handles the generic key-value storage, while `LendingPoolAddressesProvider` exposes clearer protocol-specific functions such as `setLendingPoolCore()` and `getLendingPoolCore()`.
-
-## Mental Model
-
-A good way to think about the architecture is:
-
-```text
-LendingPool = user entry point
-
-LendingPoolCore = protocol state and funds
-
-AToken = tokenized deposit position
-
-LendingPoolConfigurator = admin configuration
-
-LendingPoolDataProvider = high-level data calculations
-
-InterestRateStrategy = interest rate calculation
-
-Oracles = external price and rate data
-
-CoreLibrary = reserve and user accounting logic
-
-WadRayMath = fixed-point math
-```
-
-This separation is what makes the protocol modular.
-
-Each contract has a specific role, and the system works because these contracts coordinate with each other.

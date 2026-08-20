@@ -388,6 +388,34 @@ contract LendingPoolCore {
     }
 
     /**
+     * @dev finalizes reserve accounting as a result of a flashloan action
+     * @param _reserve the address of the reserve in which the flashloan is happening
+     * @param _income the income of the protocol as a result of the action
+     *
+     */
+    function updateStateOnFlashLoan(
+        address _reserve,
+        uint256 _avaliableLiquidityBefore,
+        uint256 _income,
+        uint256 _protocolFee
+    ) external onlyLendingPool {
+        // Send the protcol fee to the TokenDistributor
+        _transferFlashLoanProtocolFee(_reserve, _protocolFee);
+
+        // Accrue time-based interest up now
+        s_reserves[_reserve].updateCumulativeIndexes();
+
+        // Get reserve’s total value before the flash loan: cash held by Core plus outstanding debt
+        uint256 totalLiquidityBefore = _avaliableLiquidityBefore + getReserveTotalBorrows(_reserve);
+
+        // Every aToken holder receives their proportional share of the flash-loan fee
+        s_reserves[_reserve].cumulateToLiquidityIndex(totalLiquidityBefore, _income);
+
+        // Refresh interest rates and timestamp
+        _updateReserveInterestRatesAndTimestamp(_reserve, _income, 0);
+    }
+
+    /**
      * @dev transfers the fees to the fees collection address in the case of liquidation
      * @param _token the address of the token being transferred
      * @param _amount the amount being transferred
@@ -1213,6 +1241,27 @@ contract LendingPoolCore {
         user.lastUpdateTimestamp = uint40(block.timestamp);
 
         return newMode;
+    }
+
+    /**
+     * @dev transfers the protocol fees of a flashloan to the TokenDistributor
+     * @param _token the address of the token being transferred
+     * @param _amount the amount being transferred
+     *
+     */
+    function _transferFlashLoanProtocolFee(address _token, uint256 _amount) internal {
+        address receiver = i_addressesProvider.getTokenDistributor();
+
+        if (_token != EthAddressLib.ethAddress()) {
+            // ERC20 transfer
+            IERC20(_token).safeTransfer(receiver, _amount);
+        } else {
+            // ETH transfer
+            (bool success,) = receiver.call{value: _amount}("");
+            if (!success) {
+                revert LendingPoolCore__EthTransferFailed(receiver, _amount);
+            }
+        }
     }
 
     /////////////////////////////////

@@ -367,7 +367,34 @@ library CoreLibrary {
         _reserve.totalBorrowsVariable += _amount;
     }
 
-    //TODO cumulateToLiquidityIndex for flashloans
+    /**
+     * @dev distributes a one-off amount of income across every liquidity provider
+     * by increasing the reserve's liquidity index.
+     * Used for example to accumulate the flashloan fee to the reserve, and spread it through the depositors.
+     * @param _self the reserve object
+     * @param _totalLiquidity the total liquidity available in the reserve
+     * @param _amount the amount to accomulate
+     *
+     */
+    function cumulateToLiquidityIndex(ReserveData storage _self, uint256 _totalLiquidity, uint256 _amount) internal {
+        // Mathematically it applies:
+        // newIndex = oldIndex x (1 + amount / totalLiquidity)
+
+        // Example: if the reserve has 1,000 tokens of total liquidity and earns a one-time fee of 10 tokens:
+        //    - fee ratio: 10 / 1000 = 1%
+        //    - multiplier = 1 + 1% = 1.01
+        //    - A liquidity index of 1.0 ray becomes 1.01 ray
+        // Therefore every depositor's aToken balance gains 1% proportionally
+
+        // amountToLiquidityRatio = amount / totalLiquidity
+        uint256 amountToLiquidityRatio = _amount.wadToRay().rayDiv(_totalLiquidity.wadToRay());
+
+        // cumulatedLiquidity = 1 + amountToLiquidityRatio = 1 + amount / totalLiquidity
+        uint256 cumulatedLiquidity = amountToLiquidityRatio + WadRayMath.ray();
+
+        // newIndex = oldIndex x cumulatedLiquidity = oldIndex x (1 + amount / totalLiquidity)
+        _self.lastLiquidityCumulativeIndex = cumulatedLiquidity.rayMul(_self.lastLiquidityCumulativeIndex);
+    }
 
     //////////////////////////////////////////////////////
     //     Private & Internal View & Pure Functions     //

@@ -24,6 +24,7 @@
 pragma solidity 0.8.30;
 
 import {ReentrancyGuard} from "openzeppelin-contracts/utils/ReentrancyGuard.sol";
+import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import {AToken} from "src/tokenization/AToken.sol";
 import {LendingPoolCore} from "./LendingPoolCore.sol";
 import {LendingPoolAddressesProvider} from "src/configuration/LendingPoolAddressesProvider.sol";
@@ -33,6 +34,7 @@ import {LendingPoolParametersProvider} from "src/configuration/LendingPoolParame
 import {CoreLibrary} from "src/libraries/CoreLibrary.sol";
 import {EthAddressLib} from "src/libraries/EthAddressLib.sol";
 import {ILiquidationManager} from "src/interfaces/ILiquidationManager.sol";
+import {IFlashLoanReceiver} from "src/flashloan/interfaces/IFlashLoanReceiver.sol";
 
 /**
  * @title LendingPool contract
@@ -64,6 +66,9 @@ contract LendingPool is ReentrancyGuard {
     error LendingPool__LiquidationFailed(string reason);
     error LendingPool__NoBorrowInProgress();
     error LendingPool__UserCannotBorrowAtStable();
+    error LendingPool__InsufficientLiquidityToBorrow();
+    error LendingPool__InsufficientAmountForFlashLoan();
+    error LendingPool__InconsistentProtocolBalance();
 
     //////////////////////////////////
     //      Type declarations       //
@@ -201,6 +206,25 @@ contract LendingPool is ReentrancyGuard {
         uint256 _newRateMode,
         uint256 _newRate,
         uint256 _borrowBalanceIncrease,
+        uint256 _timestamp
+    );
+
+    /**
+     * @dev emitted when a flashloan is executed
+     * @param _target the address of the flashLoanReceiver
+     * @param _reserve the address of the reserve
+     * @param _amount the amount requested
+     * @param _totalFee the total fee on the amount
+     * @param _protocolFee the part of the fee for the protocol
+     * @param _timestamp the timestamp of the action
+     *
+     */
+    event FlashLoan(
+        address indexed _target,
+        address indexed _reserve,
+        uint256 _amount,
+        uint256 _totalFee,
+        uint256 _protocolFee,
         uint256 _timestamp
     );
 
@@ -690,6 +714,75 @@ contract LendingPool is ReentrancyGuard {
 
         // Emit the Swap event
         emit Swap(_reserve, msg.sender, uint256(newRateMode), newBorrowRate, borrowBalanceIncrease, block.timestamp);
+    }
+
+    /**
+     * @dev lends reserve liquidity to a receiver contract for the duration of one transaction.
+     * The receiver must return the principal plus the required fee before its callback finishes;
+     * otherwise, the entire transaction reverts.There are security concerns for developers of flashloan receiver contracts
+     * that must be kept into consideration.
+     * @param _receiver The address of the contract receiving the funds. The receiver should implement the IFlashLoanReceiver interface.
+     * @param _reserve the address of the principal reserve
+     * @param _amount the amount requested for this flashloan
+     *
+     */
+    function flashLoan(address _receiver, address _reserve, uint256 _amount, bytes memory _params)
+        external
+        nonReentrant
+        onlyActiveReserve(_reserve)
+        onlyAmountGreaterThanZero(_amount)
+    {
+        // It reads the Core contract's current ETH/ERC-20 balance and it requires to cover _amount
+        // Avoid using the getAvailableLiquidity() function in LendingPoolCore to save gas
+        uint256 availableLiquidityBefore = _reserve == EthAddressLib.ethAddress()
+            ? address(s_core).balance
+            : IERC20(_reserve).balanceOf(address(s_core));
+
+        if (availableLiquidityBefore < _amount) {
+            revert LendingPool__InsufficientLiquidityToBorrow();
+        }
+
+        // Read the parameters FLASHLOAN_FEE_TOTAL and FLASHLOAN_FEE_PROTOCOL
+        (uint256 totalFeeBips, uint256 protocolFeeBips) = s_parametersProvider.getFlashLoanFeesInBips();
+
+        // Fees are 0.35 % of the _amount
+        uint256 amountFee = _amount * totalFeeBips / 10_000;
+
+        // 30% of amountFee goes to the protocol and 70% of amountFee goes to depositors
+        uint256 protocolFee = amountFee * protocolFeeBips / 10_000;
+
+        if (amountFee == 0 || protocolFee == 0) {
+            revert LendingPool__InsufficientAmountForFlashLoan();
+        }
+
+        // Get the FlashLoanReceiver instance
+        IFlashLoanReceiver receiver = IFlashLoanReceiver(_receiver);
+
+        // Transfer _amount from LendingPoolCore to _receiver
+        s_core.transferToUser(_reserve, payable(_receiver), _amount);
+
+        // Execute acton of the receiver
+        receiver.executeOperation(_reserve, _amount, amountFee, _params);
+
+        // Verifies an exact balance invariant:
+        //      corebalanceAfter == coreBalanceBefore + amountFee
+        // This means that the loan principal has been returned and precisely the fee was earned.
+        // Any shortfall or an unexpected balance change reverts
+        uint256 availableLiquidityAfter = _reserve == EthAddressLib.ethAddress()
+            ? address(s_core).balance
+            : IERC20(_reserve).balanceOf(address(s_core));
+
+        if (availableLiquidityAfter != availableLiquidityBefore + amountFee) {
+            revert LendingPool__InconsistentProtocolBalance();
+        }
+
+        // Updates the reserve accounting:
+        //   - Protocol fee is sent to the token distributor
+        //   - The remainder increases the reserve liquidity index, benefiting aToken holders
+        //   - The rates/timestamps are refreshed
+        s_core.updateStateOnFlashLoan(_reserve, availableLiquidityBefore, amountFee - protocolFee, protocolFee);
+
+        emit FlashLoan(_receiver, _reserve, _amount, amountFee, protocolFee, block.timestamp);
     }
 
     ////////////////////////////////
