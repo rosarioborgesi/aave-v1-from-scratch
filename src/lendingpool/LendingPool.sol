@@ -35,6 +35,7 @@ import {CoreLibrary} from "src/libraries/CoreLibrary.sol";
 import {EthAddressLib} from "src/libraries/EthAddressLib.sol";
 import {ILiquidationManager} from "src/interfaces/ILiquidationManager.sol";
 import {IFlashLoanReceiver} from "src/flashloan/interfaces/IFlashLoanReceiver.sol";
+import {WadRayMath} from "src/libraries/WadRayMath.sol";
 
 /**
  * @title LendingPool contract
@@ -69,6 +70,13 @@ contract LendingPool is ReentrancyGuard {
     error LendingPool__InsufficientLiquidityToBorrow();
     error LendingPool__InsufficientAmountForFlashLoan();
     error LendingPool__InconsistentProtocolBalance();
+    error LendingPool__NoBorrowForReserve();
+    error LendingPool__BorrowRateModeIsNotStable();
+    error LendingPool__InterestRateRebalanceConditionsNotMet();
+    error LendingPool__NoLiquidityDeposited();
+    error DepositAlreadyUseadAsCollateral();
+
+    using WadRayMath for uint256;
 
     //////////////////////////////////
     //      Type declarations       //
@@ -210,6 +218,23 @@ contract LendingPool is ReentrancyGuard {
     );
 
     /**
+     * @dev emitted when the stable rate of a user gets rebalanced
+     * @param _reserve the address of the reserve
+     * @param _user the address of the user for which the rebalance has been executed
+     * @param _newStableRate the new stable borrow rate after the rebalance
+     * @param _borrowBalanceIncrease the balance increase since the last action
+     * @param _timestamp the timestamp of the action
+     *
+     */
+    event RebalanceStableBorrowRate(
+        address indexed _reserve,
+        address indexed _user,
+        uint256 _newStableRate,
+        uint256 _borrowBalanceIncrease,
+        uint256 _timestamp
+    );
+
+    /**
      * @dev emitted when a flashloan is executed
      * @param _target the address of the flashLoanReceiver
      * @param _reserve the address of the reserve
@@ -227,6 +252,22 @@ contract LendingPool is ReentrancyGuard {
         uint256 _protocolFee,
         uint256 _timestamp
     );
+
+    /**
+     * @dev emitted when a user enables a reserve as collateral
+     * @param _reserve the address of the reserve
+     * @param _user the address of the user
+     *
+     */
+    event ReserveUsedAsCollateralEnabled(address indexed _reserve, address indexed _user);
+
+    /**
+     * @dev emitted when a user disables a reserve as collateral
+     * @param _reserve the address of the reserve
+     * @param _user the address of the user
+     *
+     */
+    event ReserveUsedAsCollateralDisabled(address indexed _reserve, address indexed _user);
 
     ////////////////////////////////
     //          Modifiers         //
@@ -783,6 +824,102 @@ contract LendingPool is ReentrancyGuard {
         s_core.updateStateOnFlashLoan(_reserve, availableLiquidityBefore, amountFee - protocolFee, protocolFee);
 
         emit FlashLoan(_receiver, _reserve, _amount, amountFee, protocolFee, block.timestamp);
+    }
+
+    /**
+     * @dev rebalances the stable interest rate of a user if current liquidity rate > user stable rate.
+     * this is regulated by Aave to ensure that the protocol is not abused, and the user is paying a fair
+     * rate. Anyone can call this function though.
+     * @param _reserve the address of the reserve
+     * @param _user the address of the user to be rebalanced
+     *
+     */
+    function rebalanceStableBorrowRate(address _reserve, address _user)
+        external
+        nonReentrant
+        onlyActiveReserve(_reserve)
+    {
+        // lets anyone reset a borrower’s stable interest rate when it has become materially unfair or unsafe for the pool.
+
+        // Reads the compounded balance and the borrow balance increase.
+        (, uint256 compoundedBalance, uint256 borrowBalanceIncrease) = s_core.getUserBorrowBalances(_reserve, _user);
+
+        //step 1: user must be borrowing on _reserve at a stable rate
+        if (compoundedBalance == 0) {
+            revert LendingPool__NoBorrowForReserve();
+        }
+
+        if (s_core.getUserCurrentBorrowRateMode(_reserve, _user) != CoreLibrary.InterestRateMode.STABLE) {
+            revert LendingPool__BorrowRateModeIsNotStable();
+        }
+
+        // Reads:
+        //    - the user’s stable rate,
+        //    - the reserve’s liquidity (deposit) rate,
+        //    - the reserve’s currently quoted stable borrowing rate.
+        uint256 userCurrentStableRate = s_core.getUserCurrentStableBorrowRate(_reserve, _user);
+        uint256 liquidityRate = s_core.getReserveCurrentLiquidityRate(_reserve);
+        uint256 reserveCurrentStableRate = s_core.getReserveCurrentStableBorrowRate(_reserve);
+        uint256 rebalanceDownRateThreshold =
+            reserveCurrentStableRate.rayMul(WadRayMath.ray() + s_parametersProvider.getRebalanceDownRateDelta());
+
+        //Step 2: we have two possible situations to rebalance:
+
+        //  1. User stable borrow rate is below the current liquidity rate. The loan needs to be rebalanced,
+        //      as this situation can be abused (user putting back the borrowed liquidity in the same reserve to earn on it)
+        //  2. user stable rate is above the market avg borrow rate of a certain delta, and utilization rate is low.
+        //      In this case, the user is paying an interest that is too high, and needs to be rescaled down.
+        if (userCurrentStableRate < liquidityRate || userCurrentStableRate > rebalanceDownRateThreshold) {
+            // The core contract updates the state:
+            //    - Adds accrued interest (borrowBalanceIncrease) into the borrower’s principal.
+            //    - Updates reserve stable-borrow accounting.
+            //    - Sets the borrower’s rate to the reserve’s current stable borrow rate.
+            //    - Updates reserve rate data and timestamps.
+            uint256 newStableRate = s_core.updateStateOnRebalance(_reserve, _user, borrowBalanceIncrease);
+
+            emit RebalanceStableBorrowRate(_reserve, _user, newStableRate, borrowBalanceIncrease, block.timestamp);
+
+            return;
+        }
+
+        revert LendingPool__InterestRateRebalanceConditionsNotMet();
+    }
+
+    /**
+     * @dev lets a depositor toggle whether their deposited asset in _reserve counts as borrowing collateral.
+     * @param _reserve the address of the reserve
+     * @param _useAsCollateral true if the user wants to user the deposit as collateral, false otherwise.
+     *
+     */
+    function setUserUseReserveAsCollateral(address _reserve, bool _useAsCollateral)
+        external
+        nonReentrant
+        onlyActiveReserve(_reserve)
+        onlyUnfreezedReserve(_reserve)
+    {
+        // Require a deposit
+        // The "underlying balance" is obtained from the user's aToken balance, which represents their interest-bearing deposit
+        uint256 underlyingBalance = s_core.getUserUnderlyingAssetBalance(_reserve, msg.sender);
+        if (underlyingBalance == 0) {
+            revert LendingPool__NoLiquidityDeposited();
+        }
+
+        // Prevent unsafe collateral removal
+        // Checks if removing the deposit from collateral keep the position safe.
+        // If this asset is currently enabled as collateral and the user has debt,
+        // the data provider recalculates the health factor as if the full balance disappeared.
+        if (!s_dataProvider.balanceDecreaseAllowed(_reserve, msg.sender, underlyingBalance)) {
+            revert DepositAlreadyUseadAsCollateral();
+        }
+
+        // STore the preference
+        s_core.setUserUseReserveAsCollateral(_reserve, msg.sender, _useAsCollateral);
+
+        if (_useAsCollateral) {
+            emit ReserveUsedAsCollateralEnabled(_reserve, msg.sender);
+        } else {
+            emit ReserveUsedAsCollateralDisabled(_reserve, msg.sender);
+        }
     }
 
     ////////////////////////////////

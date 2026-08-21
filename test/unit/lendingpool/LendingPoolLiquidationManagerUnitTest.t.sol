@@ -5,8 +5,8 @@ import {Test} from "forge-std/Test.sol";
 
 import {MockLendingPoolAddressesProvider} from "../../mocks/MockLendingPoolAddressesProvider.sol";
 import {MockLendingPoolCore} from "../../mocks/MockLendingPoolCore.sol";
-import {MockERC20} from "../../mocks/MockERC20.sol";
-import {MockPriceOracle} from "../../mocks/MockPriceOracle.sol";
+import {MockERC20} from "../../mocks/tokens/MockERC20.sol";
+import {MockPriceOracle} from "../../mocks/oracle/MockPriceOracle.sol";
 
 import {LendingPoolLiquidationManager} from "src/lendingpool/LendingPoolLiquidationManager.sol";
 

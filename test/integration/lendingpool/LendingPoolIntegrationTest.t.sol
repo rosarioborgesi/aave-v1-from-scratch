@@ -3,10 +3,10 @@ pragma solidity 0.8.30;
 
 import {Test, console} from "forge-std/Test.sol";
 
-import {MockERC20} from "../../mocks/MockERC20.sol";
-import {MockFeeProvider} from "../../mocks/MockFeeProvider.sol";
-import {MockFlashLoanReceiver} from "../../mocks/MockFlashLoanReceiver.sol";
-import {MockPriceOracle} from "../../mocks/MockPriceOracle.sol";
+import {MockERC20} from "../../mocks/tokens/MockERC20.sol";
+import {MockFeeProvider} from "../../mocks/fees/MockFeeProvider.sol";
+import {MockFlashLoanReceiver} from "../../mocks/flashloan/MockFlashLoanReceiver.sol";
+import {MockPriceOracle} from "../../mocks/oracle/MockPriceOracle.sol";
 import {MockReserveInterestRateStrategy} from "../../mocks/MockReserveInterestRateStrategy.sol";
 
 import {AToken} from "src/tokenization/AToken.sol";
@@ -57,6 +57,7 @@ contract LendingPoolIntegrationTest is Test {
 
     address public user = makeAddr("user");
     address public secondUser = makeAddr("secondUser");
+    address public thirdUser = makeAddr("thirdUser");
     address public liquidator = makeAddr("liquidator");
     address public configurator = makeAddr("configurator");
     address public feeCollector = makeAddr("feeCollector");
@@ -1955,6 +1956,86 @@ contract LendingPoolIntegrationTest is Test {
         assertEq(core.getUserOriginationFee(address(weth), user), originationFeeBeforeSwap);
     }
 
+    /////////////////////////////////////////////////
+    //          rebalanceStableBorrowRate          //
+    /////////////////////////////////////////////////
+
+    // Anyone can reset a stable borrower's rate when the reserve's liquidity
+    // rate has risen above the borrower's stored stable rate.
+    // Which means userCurrentStableRate < liquidityRate in LendingPool.rebalanceStableBorrowRate
+    function testAnyoneCanRebalanceStableBorrowRateWhenLiquidityRateExceedsUserRate() external {
+        uint256 depositAmount = 100 ether;
+        uint256 wethLiquidity = 1 ether;
+        uint256 borrowAmount = 0.02 ether;
+        uint256 userStableBorrowRate = 0.05e27; // 5%
+        uint256 liquidityRateAfterRefresh = 0.06e27; // 6%
+        uint256 rebalancedStableBorrowRate = 0.08e27; // 8%
+
+        // The rate strategy is configured so a stable WETH loan costs 5%
+        interestRateStrategy.setRates(0, userStableBorrowRate, 0);
+
+        // User deposits 100 DAI as a collateral
+        vm.startPrank(user);
+        dai.approve(address(core), depositAmount);
+        pool.deposit(address(dai), depositAmount, 0);
+        vm.stopPrank();
+
+        // Second user supplies 1 WETH for liquidity
+        weth.mint(secondUser, wethLiquidity);
+        vm.startPrank(secondUser);
+        weth.approve(address(core), wethLiquidity);
+        pool.deposit(address(weth), wethLiquidity, 0);
+        vm.stopPrank();
+
+        // User borrows 0.02 WETH at 5% stable rate
+        vm.prank(user);
+        pool.borrow(address(weth), borrowAmount, uint256(CoreLibrary.InterestRateMode.STABLE), 0);
+        assertEq(core.getUserCurrentStableBorrowRate(address(weth), user), userStableBorrowRate);
+
+        // The test changes the mocked strategy to quote:
+        //   - liquidity rate: 6%
+        //   - new stable borrowing rate: 8%
+        interestRateStrategy.setRates(liquidityRateAfterRefresh, rebalancedStableBorrowRate, 0);
+
+        // Second user deposits again. Deposits refresh reserve rates,
+        // so the WETH reserve now stores the 6% liquidity rate and 8% stable-borrow rate.
+        weth.mint(secondUser, wethLiquidity);
+        vm.startPrank(secondUser);
+        weth.approve(address(core), wethLiquidity);
+        pool.deposit(address(weth), wethLiquidity, 0);
+        vm.stopPrank();
+
+        // Now the borrower is paying 5% while WETH suppliers earn 6%.
+        // That is the eligibility condition in LendingPool.rebalanceStableBorrowRate:
+        //    userCurrentStableRate < liquidityRate
+
+        assertEq(core.getReserveCurrentLiquidityRate(address(weth)), liquidityRateAfterRefresh);
+        assertEq(core.getReserveCurrentStableBorrowRate(address(weth)), rebalancedStableBorrowRate);
+
+        // A third party, not the borrower, can execute the rebalance.
+        vm.expectEmit(true, true, true, true, address(pool));
+        emit LendingPool.RebalanceStableBorrowRate(address(weth), user, rebalancedStableBorrowRate, 0, block.timestamp);
+        vm.prank(thirdUser);
+        // The function is permissionless: anyone may trigger it when the condition holds.
+        pool.rebalanceStableBorrowRate(address(weth), user);
+
+        (uint256 principalBorrowBalance, uint256 compoundedBorrowBalance, uint256 borrowBalanceIncrease) =
+            core.getUserBorrowBalances(address(weth), user);
+        assertEq(principalBorrowBalance, borrowAmount); // No interest has accrued because the test executes within the same timestamp/block
+        assertEq(compoundedBorrowBalance, borrowAmount); // No interest has accrued because the test executes within the same timestamp/block
+        assertEq(borrowBalanceIncrease, 0); // No interest has accrued because the test executes within the same timestamp/block
+
+        // The borrower's stable rate changes from 5% to the reserve's current 8%
+        assertEq(core.getUserCurrentStableBorrowRate(address(weth), user), rebalancedStableBorrowRate);
+        // The loan remains a stable-rate loan
+        assertEq(
+            uint256(core.getUserCurrentBorrowRateMode(address(weth), user)),
+            uint256(CoreLibrary.InterestRateMode.STABLE)
+        );
+        assertEq(core.getReserveTotalBorrowsStable(address(weth)), borrowAmount); // Total stable WETH debt stays 0.02 WETH
+        assertEq(core.getReserveTotalBorrowsVariable(address(weth)), 0); // Variable debt remains 0
+    }
+
     ////////////////////////////////////
     //           flashLoan            //
     ////////////////////////////////////
@@ -1962,11 +2043,12 @@ contract LendingPoolIntegrationTest is Test {
     // Demonstrates the complete happy path of an ERC-20 flash loan.
     function testFlashLoanReturnsPrincipalAndDistributesFee() external {
         uint256 reserveLiquidity = 100 ether;
-        uint256 flashLoanAmount = 10 ether;        
-        uint256 totalFee = flashLoanAmount * 35 / 10_000;        
+        uint256 flashLoanAmount = 10 ether;
+        uint256 totalFee = flashLoanAmount * 35 / 10_000;
         uint256 protocolFee = totalFee * 3000 / 10_000;
         uint256 depositorFee = totalFee - protocolFee;
-        MockFlashLoanReceiver receiver = new MockFlashLoanReceiver(ILendingPoolAddressesProvider(address(addressesProvider)));
+        MockFlashLoanReceiver receiver =
+            new MockFlashLoanReceiver(ILendingPoolAddressesProvider(address(addressesProvider)));
 
         // Gives the pool core 100 DAI as available liquidity
         dai.mint(address(core), reserveLiquidity);
@@ -1974,7 +2056,9 @@ contract LendingPoolIntegrationTest is Test {
         vm.expectEmit(true, true, true, true, address(receiver));
         emit MockFlashLoanReceiver.ExecutedWithSuccess(address(dai), flashLoanAmount, totalFee);
         vm.expectEmit(true, true, true, true, address(pool));
-        emit LendingPool.FlashLoan(address(receiver), address(dai), flashLoanAmount, totalFee, protocolFee, block.timestamp);
+        emit LendingPool.FlashLoan(
+            address(receiver), address(dai), flashLoanAmount, totalFee, protocolFee, block.timestamp
+        );
 
         // It requires a flash loan of 10 DAI through a MockFlashLoanReceiver.
         pool.flashLoan(address(receiver), address(dai), flashLoanAmount, bytes(""));

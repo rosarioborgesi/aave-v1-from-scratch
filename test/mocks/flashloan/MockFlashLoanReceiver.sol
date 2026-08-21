@@ -25,7 +25,7 @@ pragma solidity 0.8.30;
 
 import {FlashLoanReceiverBase} from "src/flashloan/base/FlashLoanReceiverBase.sol";
 import {ILendingPoolAddressesProvider} from "src/interfaces/ILendingPoolAddressesProvider.sol";
-import {MockERC20} from "./MockERC20.sol";
+import {MockERC20} from "../tokens/MockERC20.sol";
 import {EthAddressLib} from "src/libraries/EthAddressLib.sol";
 
 contract MockFlashLoanReceiver is FlashLoanReceiverBase {
@@ -57,7 +57,15 @@ contract MockFlashLoanReceiver is FlashLoanReceiverBase {
         failExecution = _fail;
     }
 
-    function executeOperation(address _reserve, uint256 _amount, uint256 _fee, bytes memory /*_params*/ ) external override {
+    function executeOperation(
+        address _reserve,
+        uint256 _amount,
+        uint256 _fee,
+        bytes memory /*_params*/
+    )
+        external
+        override
+    {
         // Cast the _reserve address to a MockERC20
         MockERC20 token = MockERC20(_reserve);
 

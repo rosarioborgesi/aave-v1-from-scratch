@@ -31,6 +31,7 @@ import {WadRayMath} from "src/libraries/WadRayMath.sol";
 import {CoreLibrary} from "src/libraries/CoreLibrary.sol";
 import {EthAddressLib} from "src/libraries/EthAddressLib.sol";
 import {AToken} from "src/tokenization/AToken.sol";
+import {ILendingRateOracle} from "src/interfaces/ILendingRateOracle.sol";
 
 /**
  * @title LendingPoolCore contract
@@ -224,17 +225,6 @@ contract LendingPoolCore {
         }
 
         // Reset the s_reserves[lastReserve] fields
-        /* s_reserves[lastReserve].isActive = false;
-        s_reserves[lastReserve].aTokenAddress = address(0);
-        s_reserves[lastReserve].decimals = 0;
-        s_reserves[lastReserve].lastLiquidityCumulativeIndex = 0;
-        s_reserves[lastReserve].lastVariableBorrowCumulativeIndex = 0;
-        s_reserves[lastReserve].borrowingEnabled = false;
-        s_reserves[lastReserve].usageAsCollateralEnabled = false;
-        s_reserves[lastReserve].baseLTVasCollateral = 0;
-        s_reserves[lastReserve].liquidationThreshold = 0;
-        s_reserves[lastReserve].liquidationBonus = 0;
-        s_reserves[lastReserve].interestRateStrategyAddress = address(0); */
         delete s_reserves[lastReserve];
 
         s_isReserveAdded[lastReserve] = false;
@@ -433,6 +423,31 @@ contract LendingPoolCore {
                 revert LendingPoolCore__EthTransferFailed(_destination, _amount);
             }
         }
+    }
+
+    /**
+     * @dev updates the state of the core as a consequence of a stable rate rebalance
+     * @param _reserve the address of the principal reserve where the user borrowed
+     * @param _user the address of the borrower
+     * @param _balanceIncrease the accrued interest on the borrowed amount
+     * @return the new stable rate for the user
+     *
+     */
+    function updateStateOnRebalance(address _reserve, address _user, uint256 _balanceIncrease)
+        external
+        onlyLendingPool
+        returns (uint256)
+    {
+        // Update reserve-level debt totals and cumulative indexes for the rebalance.
+        _updateReserveStateOnRebalance(_reserve, _user, _balanceIncrease);
+
+        // Realize the user's accrued debt and replace their stable rate.
+        _updateUserStateOnRebalance(_reserve, _user, _balanceIncrease);
+
+        // Recalculate reserve interest rates after its stable-debt composition changes.
+        _updateReserveInterestRatesAndTimestamp(_reserve, 0, 0);
+
+        return s_usersReserveData[_user][_reserve].stableBorrowRate;
     }
 
     /**
@@ -1264,6 +1279,45 @@ contract LendingPoolCore {
         }
     }
 
+    /**
+     * @dev updates the state of the reserve as a consequence of a stable rate rebalance
+     * @param _reserve the address of the principal reserve where the user borrowed
+     * @param _user the address of the borrower
+     * @param _balanceIncrease the accrued interest on the borrowed amount
+     *
+     */
+
+    function _updateReserveStateOnRebalance(address _reserve, address _user, uint256 _balanceIncrease) internal {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
+
+        // Accrue the reserve's liquidity and variable-borrow indexes through the current block.
+        reserve.updateCumulativeIndexes();
+
+        // Add the user's accrued stable interest to the reserve's stable debt and update its weighted average rate.
+        reserve.increaseTotalBorrowsStableAndUpdateAverageRate(_balanceIncrease, user.stableBorrowRate);
+    }
+
+    /**
+     * @dev updates the state of the user as a consequence of a stable rate rebalance
+     * @param _reserve the address of the principal reserve where the user borrowed
+     * @param _user the address of the borrower
+     * @param _balanceIncrease the accrued interest on the borrowed amount
+     *
+     */
+
+    function _updateUserStateOnRebalance(address _reserve, address _user, uint256 _balanceIncrease) internal {
+        CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+
+        // Realize the interest accrued since the user's last debt-state update in the stored principal.
+        user.principalBorrowBalance = user.principalBorrowBalance + _balanceIncrease;
+        // Reset the user's stable loan to the reserve's current stable borrowing rate.
+        user.stableBorrowRate = reserve.currentStableBorrowRate;
+
+        user.lastUpdateTimestamp = uint40(block.timestamp);
+    }
+
     /////////////////////////////////
     //       Private Functions     //
     /////////////////////////////////
@@ -1755,5 +1809,35 @@ contract LendingPoolCore {
     function getReserveLiquidationBonus(address _reserve) external view returns (uint256) {
         CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
         return reserve.liquidationBonus;
+    }
+
+    /**
+     * @dev gets the reserve liquidity rate
+     * @param _reserve the reserve address
+     * @return the reserve liquidity rate
+     *
+     */
+    function getReserveCurrentLiquidityRate(address _reserve) external view returns (uint256) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        return reserve.currentLiquidityRate;
+    }
+
+    /**
+     * @dev gets the reserve current stable borrow rate. Is the market rate if the reserve is empty
+     * @param _reserve the reserve address
+     * @return the reserve current stable borrow rate
+     *
+     */
+
+    function getReserveCurrentStableBorrowRate(address _reserve) external view returns (uint256) {
+        CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
+        ILendingRateOracle oracle = ILendingRateOracle(i_addressesProvider.getLendingRateOracle());
+
+        if (reserve.currentStableBorrowRate == 0) {
+            //no stable rate borrows yet
+            return oracle.getMarketBorrowRate(_reserve);
+        }
+
+        return reserve.currentStableBorrowRate;
     }
 }

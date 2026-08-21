@@ -4,7 +4,7 @@ pragma solidity 0.8.30;
 import {Test, console} from "forge-std/Test.sol";
 
 import {MockLendingPoolCore} from "../../mocks/MockLendingPoolCore.sol";
-import {MockPriceOracle} from "../../mocks/MockPriceOracle.sol";
+import {MockPriceOracle} from "../../mocks/oracle/MockPriceOracle.sol";
 import {LendingPoolAddressesProvider} from "src/configuration/LendingPoolAddressesProvider.sol";
 import {LendingPoolDataProvider} from "src/lendingpool/LendingPoolDataProvider.sol";
 import {WadRayMath} from "src/libraries/WadRayMath.sol";

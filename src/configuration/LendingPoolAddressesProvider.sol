@@ -50,6 +50,7 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
     bytes32 private constant LENDING_POOL_PARAMETERS_PROVIDER = "PARAMETERS_PROVIDER";
     bytes32 private constant TOKEN_DISTRIBUTOR = "TOKEN_DISTRIBUTOR";
     bytes32 private constant LENDING_POOL_LIQUIDATION_MANAGER = "LIQUIDATION_MANAGER";
+    bytes32 private constant LENDING_RATE_ORACLE = "LENDING_RATE_ORACLE";
 
     ////////////////////////////////
     //           Events           //
@@ -63,6 +64,7 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
     event LendingPoolParametersProviderUpdated(address indexed newAddress);
     event TokenDistributorUpdated(address indexed newAddress);
     event LendingPoolLiquidationManagerUpdated(address indexed newAddress);
+    event LendingRateOracleUpdated(address indexed newAddress);
 
     ////////////////////////////////
     //          Modifiers         //
@@ -120,6 +122,11 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
         emit LendingPoolLiquidationManagerUpdated(_manager);
     }
 
+    function setLendingRateOracle(address _lendingRateOracle) external onlyOwner {
+        _setAddress(LENDING_RATE_ORACLE, _lendingRateOracle);
+        emit LendingRateOracleUpdated(_lendingRateOracle);
+    }
+
     ////////////////////////////////
     //       Public Functions     //
     ////////////////////////////////
@@ -166,5 +173,9 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
 
     function getLendingPoolLiquidationManager() external view returns (address) {
         return getAddress(LENDING_POOL_LIQUIDATION_MANAGER);
+    }
+
+    function getLendingRateOracle() external view returns (address) {
+        return getAddress(LENDING_RATE_ORACLE);
     }
 }

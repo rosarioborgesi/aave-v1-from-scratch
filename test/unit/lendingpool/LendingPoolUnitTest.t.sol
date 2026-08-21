@@ -4,8 +4,8 @@ pragma solidity 0.8.30;
 import {Test} from "forge-std/Test.sol";
 import {ReentrancyGuard} from "openzeppelin-contracts/utils/ReentrancyGuard.sol";
 
-import {MockERC20} from "../../mocks/MockERC20.sol";
-import {MockFeeProvider} from "../../mocks/MockFeeProvider.sol";
+import {MockERC20} from "../../mocks/tokens/MockERC20.sol";
+import {MockFeeProvider} from "../../mocks/fees/MockFeeProvider.sol";
 import {MockLendingPoolCore} from "../../mocks/MockLendingPoolCore.sol";
 
 import {LendingPoolAddressesProvider} from "src/configuration/LendingPoolAddressesProvider.sol";

@@ -11,6 +11,44 @@ important concepts with modern Solidity, Foundry, and extensive tests.
 > **Warning:** This is a learning project, not a production-ready lending
 > protocol. It has not been audited and must not be used with real funds.
 
+## Protocol Overview
+
+Aave is a decentralized, non-custodial lending protocol built around shared
+liquidity reserves. 
+
+Suppliers add assets to a reserve and earn interest from
+the borrowers who use that liquidity. 
+
+Borrowers must provide enough collateral
+to secure their debt, and the protocol continuously evaluates the value of
+their collateral against what they owe. 
+
+Interest rates respond to reserve
+conditions: borrowing generally becomes more expensive as the available
+liquidity is used. 
+
+Smart contracts enforce the rules and perform every
+operation without a traditional lender or intermediary.
+
+The protocol's core functions are:
+
+- **Deposit:** Adds an asset to a reserve and mints interest-bearing aTokens to
+  the supplier.
+- **Redeem:** Burns aTokens and returns the corresponding underlying asset.
+- **Borrow:** Transfers an asset from a reserve to a user whose collateral can
+  safely support the new debt.
+- **Repay:** Returns borrowed assets and pays accrued interest, reducing or
+  clearing the user's debt.
+- **Liquidation:** Allows a liquidator to repay part of an undercollateralized
+  user's debt in exchange for collateral plus a bonus.
+- **Flash loan:** Provides an uncollateralized loan that must be returned, with
+  a fee, before the same transaction ends; otherwise, the entire transaction
+  reverts.
+- **Switch rate:** Changes an existing debt between stable and variable
+  interest-rate modes.
+- **Rebalance:** Updates a borrower's stable rate when defined market conditions
+  make the existing rate unsustainable for the reserve.
+
 ## What This Project Is Trying to Teach
 
 A lending protocol can look like a large collection of contracts, formulas,
@@ -54,12 +92,13 @@ are listed below.
 | --- | --- | --- | --- |
 | Deployment | Upgradeable contracts initialized through a proxy | Contracts use constructors and are deployed directly | Direct deployment makes initialization and contract relationships easier to follow |
 | Solidity | An older Solidity version | Solidity `0.8.30` | Uses current language features and compiler checks |
-| Development tools | The original repository used the tooling of its time | Foundry is used for building and testing | Provides a fast, Solidity-native test workflow |
+| Development tools | The original repository used `Hardhat` | `Foundry` is used for building and testing | Provides a fast, Solidity-native test workflow |
 | Arithmetic safety | `SafeMath` was required | Native checked arithmetic is used | Solidity 0.8 reverts on integer overflow and underflow by default |
 | Revert handling | Mostly `require` statements and revert strings | `if` statements with custom errors | Makes failure cases explicit and reduces revert-data gas costs |
 | OpenZeppelin | OpenZeppelin Contracts `2.3.0` | OpenZeppelin Contracts `5.6.1` | Adapts the implementation to modern library APIs and security utilities |
 | aToken interest redirection | A deposit's accrued interest could be redirected to another address | Interest redirection is omitted | It adds substantial accounting complexity and was later removed from Aave |
-| Stable-rate borrowing | Present in Aave V1 | Retained | It is needed to study stable debt accounting and the borrow-rate swap flow |
+
+Stable-rate borrowing remains included, even if it has been deprecated in Aave V3, because it is useful for studying debt accounting and borrow-rate swaps.
 
 ## Suggested Reading
 

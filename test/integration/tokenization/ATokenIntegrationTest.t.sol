@@ -3,9 +3,9 @@ pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
 
-import {MockERC20} from "../../mocks/MockERC20.sol";
-import {MockFeeProvider} from "../../mocks/MockFeeProvider.sol";
-import {MockPriceOracle} from "../../mocks/MockPriceOracle.sol";
+import {MockERC20} from "../../mocks/tokens/MockERC20.sol";
+import {MockFeeProvider} from "../../mocks/fees/MockFeeProvider.sol";
+import {MockPriceOracle} from "../../mocks/oracle/MockPriceOracle.sol";
 import {MockReserveInterestRateStrategy} from "../../mocks/MockReserveInterestRateStrategy.sol";
 
 import {AToken} from "src/tokenization/AToken.sol";
