@@ -57,6 +57,7 @@ contract LendingPoolCore {
     error LendingPoolCore__ReserveNotInitializedYet();
     error LendingPoolCore__CannotSendEthAlongWithErc20Transfer();
     error LendingPoolCore__AmountAndValueSentDoNotMatch();
+    error LendingPoolCore__OnlyContractsCanSendEth();
 
     ///////////////////////////////////
     //            Libraries          //
@@ -139,6 +140,13 @@ contract LendingPoolCore {
             revert LendingPoolCore__ZeroAddress();
         }
         i_addressesProvider = LendingPoolAddressesProvider(_addressesProvider);
+    }
+
+    /// @dev Only contracts may send ETH to the LendingPoolCore.
+    receive() external payable {
+        if (msg.sender.code.length == 0) {
+            revert LendingPoolCore__OnlyContractsCanSendEth();
+        }
     }
 
     ////////////////////////////////
@@ -481,7 +489,7 @@ contract LendingPoolCore {
      * @param _reserve the address of the reserve
      *
      */
-    function disbaleBorrowingOnReserve(address _reserve) external onlyLendingPoolConfigurator {
+    function disableBorrowingOnReserve(address _reserve) external onlyLendingPoolConfigurator {
         s_reserves[_reserve].disableBorrowing();
     }
 

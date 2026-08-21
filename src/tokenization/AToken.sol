@@ -154,7 +154,7 @@ contract AToken is ERC20 {
             revert AToken__ZeroAddress();
         }
 
-        i_core = LendingPoolCore(coreAddress);
+        i_core = LendingPoolCore(payable(coreAddress));
         i_pool = LendingPool(poolAddress);
         i_dataProvider = LendingPoolDataProvider(dataProviderAddress);
         i_underlyingAssetAddress = _underlyingAsset;

@@ -5,7 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {ReentrancyGuard} from "openzeppelin-contracts/utils/ReentrancyGuard.sol";
 
 import {MockERC20} from "../../mocks/tokens/MockERC20.sol";
-import {MockFeeProvider} from "../../mocks/fees/MockFeeProvider.sol";
+import {FeeProvider} from "src/fees/FeeProvider.sol";
 import {MockLendingPoolCore} from "../../mocks/MockLendingPoolCore.sol";
 
 import {LendingPoolAddressesProvider} from "src/configuration/LendingPoolAddressesProvider.sol";
@@ -57,7 +57,7 @@ contract LendingPoolUnitTest is Test {
         addressesProvider.setLendingPoolCore(address(core));
 
         addressesProvider.setLendingPoolDataProvider(address(new LendingPoolDataProvider(address(addressesProvider))));
-        addressesProvider.setFeeProvider(address(new MockFeeProvider()));
+        addressesProvider.setFeeProvider(address(new FeeProvider()));
         addressesProvider.setLendingPoolParametersProvider(address(new LendingPoolParametersProvider()));
 
         pool = new LendingPool(address(addressesProvider));

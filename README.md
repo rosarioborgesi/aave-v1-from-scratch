@@ -16,12 +16,6 @@ Aave is a decentralised lending protocol. Users supply crypto assets to shared
 liquidity pools and receive interest-bearing **aTokens** in return. Other users
 can borrow from those pools after depositing sufficient collateral.
 
-```text
-Suppliers -- deposit assets --> shared reserve -- borrow assets --> Borrowers
-    ^                              |                                  |
-    |---- receive aTokens + yield --|---- interest and fees ------------|
-```
-
 Interest paid by borrowers contributes to supplier yield. The protocol protects
 the pools by limiting borrowing according to collateral value, loan-to-value
 (LTV) ratios, liquidation thresholds, and a user's health factor. If a position

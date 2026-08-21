@@ -1,3 +1,5 @@
+// TODO TO BE REVIEWED
+
 # Aave V1 Protocol Architecture
 
 Aave V1 is a pool-based lending protocol.

@@ -62,9 +62,6 @@ abstract contract FlashLoanReceiverBase is IFlashLoanReceiver {
     /// @notice Accepts native ETH sent directly to this receiver.
     receive() external payable {}
 
-    /// @notice Accepts native ETH sent with data that does not match a function.
-    fallback() external payable {}
-
     ////////////////////////////////
     //     Internal Functions     //
     ////////////////////////////////

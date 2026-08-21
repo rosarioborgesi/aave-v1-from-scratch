@@ -4,7 +4,7 @@ pragma solidity 0.8.30;
 import {IFeeProvider} from "src/interfaces/IFeeProvider.sol";
 import {WadRayMath} from "src/libraries/WadRayMath.sol";
 
-contract MockFeeProvider is IFeeProvider {
+contract FeeProvider is IFeeProvider {
     using WadRayMath for uint256;
 
     uint256 private constant LOAN_ORIGINATION_FEE_PERCENTAGE = 0.0025 ether;

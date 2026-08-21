@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">Default reserve interest-rate strategy</title>
+  <desc id="desc">A chart of utilization from zero to one hundred percent. Variable and stable borrowing rates rise gently until the eighty percent optimal utilization point, then steeply. The liquidity rate is shown as an illustrative lower curve because it depends on the mix of outstanding debt.</desc>
+  <style>
+    .title { font: 700 30px Arial, sans-serif; fill: #172033; }
+    .subtitle { font: 16px Arial, sans-serif; fill: #536079; }
+    .axis { stroke: #71809b; stroke-width: 2; }
+    .grid { stroke: #dce3ee; stroke-width: 1; stroke-dasharray: 5 7; }
+    .tick { font: 14px Arial, sans-serif; fill: #536079; }
+    .label { font: 600 15px Arial, sans-serif; fill: #33415c; }
+    .note { font: 14px Arial, sans-serif; fill: #536079; }
+    .formula { font: 600 14px Arial, sans-serif; fill: #33415c; }
+    .legend { font: 600 15px Arial, sans-serif; fill: #172033; }
+  </style>
+
+  <rect width="1200" height="760" fill="#ffffff"/>
+  <text x="80" y="58" class="title">DefaultReserveInterestRateStrategy</text>
+  <text x="80" y="85" class="subtitle">Illustrative rate curves — actual base rates and slopes are configured separately for each reserve</text>
+
+  <!-- Plot area: x = 160..1060, y = 160..560 -->
+  <line x1="160" y1="160" x2="160" y2="560" class="axis"/>
+  <line x1="160" y1="560" x2="1060" y2="560" class="axis"/>
+  <line x1="160" y1="460" x2="1060" y2="460" class="grid"/>
+  <line x1="160" y1="360" x2="1060" y2="360" class="grid"/>
+  <line x1="160" y1="260" x2="1060" y2="260" class="grid"/>
+  <line x1="880" y1="140" x2="880" y2="590" stroke="#7c3aed" stroke-width="2" stroke-dasharray="7 7"/>
+
+  <text x="148" y="565" text-anchor="end" class="tick">0</text>
+  <text x="148" y="465" text-anchor="end" class="tick">low</text>
+  <text x="148" y="365" text-anchor="end" class="tick">medium</text>
+  <text x="148" y="265" text-anchor="end" class="tick">high</text>
+  <text x="160" y="588" text-anchor="middle" class="tick">0%</text>
+  <text x="520" y="588" text-anchor="middle" class="tick">40%</text>
+  <text x="880" y="588" text-anchor="middle" class="tick">80%</text>
+  <text x="1060" y="588" text-anchor="middle" class="tick">100%</text>
+  <text x="610" y="632" text-anchor="middle" class="label">Utilization rate = total borrows / (available liquidity + total borrows)</text>
+  <text x="95" y="365" transform="rotate(-90 95 365)" text-anchor="middle" class="label">Annualized rate</text>
+  <text x="880" y="128" text-anchor="middle" class="label" fill="#6d28d9">80% optimal utilization</text>
+
+  <!-- Variable: base + slope1, then slope2 -->
+  <path d="M160 515 L880 400 L1060 195" fill="none" stroke="#0f766e" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="160" cy="515" r="6" fill="#0f766e"/>
+  <circle cx="880" cy="400" r="6" fill="#0f766e"/>
+  <text x="176" y="505" class="note" fill="#0f766e">base variable rate</text>
+  <text x="570" y="438" class="legend" fill="#0f766e">Variable borrow rate</text>
+  <text x="573" y="460" class="note">base + variableSlope1 × U / 80%</text>
+  <text x="910" y="315" class="note" fill="#0f766e">+ variableSlope2</text>
+
+  <!-- Stable: oracle rate + slopes -->
+  <path d="M160 445 L880 345 L1060 175" fill="none" stroke="#2563eb" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="160" cy="445" r="6" fill="#2563eb"/>
+  <circle cx="880" cy="345" r="6" fill="#2563eb"/>
+  <text x="176" y="435" class="note" fill="#2563eb">market rate from oracle</text>
+  <text x="400" y="333" class="legend" fill="#2563eb">Stable borrow rate</text>
+  <text x="400" y="355" class="note">oracle market rate + stable slopes</text>
+  <text x="910" y="280" class="note" fill="#2563eb">+ stableSlope2</text>
+
+  <!-- Liquidity curve, illustrative only -->
+  <path d="M160 560 C400 557, 670 522, 880 463 C958 438, 1015 384, 1060 318" fill="none" stroke="#d97706" stroke-width="6" stroke-linecap="round"/>
+  <text x="425" y="525" class="legend" fill="#d97706">Liquidity (supplier) rate</text>
+  <text x="425" y="547" class="note">weighted average borrow rate × utilization</text>
+
+  <!-- Legend and note -->
+  <rect x="160" y="665" width="900" height="58" rx="10" fill="#f5f3ff" stroke="#ddd6fe"/>
+  <text x="184" y="691" class="formula">Above 80%:</text>
+  <text x="285" y="691" class="note">the excess 20% utilization range is normalized to 0–100%, then multiplied by slope2.</text>
+  <text x="184" y="713" class="note">The orange curve is illustrative: its precise value depends on the outstanding stable/variable debt mix and the average existing stable-borrow rate.</text>
+</svg>

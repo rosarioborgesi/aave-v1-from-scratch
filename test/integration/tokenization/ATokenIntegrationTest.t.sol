@@ -4,7 +4,7 @@ pragma solidity 0.8.30;
 import {Test} from "forge-std/Test.sol";
 
 import {MockERC20} from "../../mocks/tokens/MockERC20.sol";
-import {MockFeeProvider} from "../../mocks/fees/MockFeeProvider.sol";
+import {FeeProvider} from "src/fees/FeeProvider.sol";
 import {MockPriceOracle} from "../../mocks/oracle/MockPriceOracle.sol";
 import {MockReserveInterestRateStrategy} from "../../mocks/MockReserveInterestRateStrategy.sol";
 
@@ -43,7 +43,7 @@ contract ATokenIntegrationTest is Test {
 
         dataProvider = new LendingPoolDataProvider(address(addressesProvider));
         addressesProvider.setLendingPoolDataProvider(address(dataProvider));
-        addressesProvider.setFeeProvider(address(new MockFeeProvider()));
+        addressesProvider.setFeeProvider(address(new FeeProvider()));
         addressesProvider.setLendingPoolParametersProvider(address(new LendingPoolParametersProvider()));
 
         pool = new LendingPool(address(addressesProvider));

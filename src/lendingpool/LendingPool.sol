@@ -327,7 +327,7 @@ contract LendingPool is ReentrancyGuard {
             revert LendingPool__ZeroAddress();
         }
 
-        s_core = LendingPoolCore(coreAddress);
+        s_core = LendingPoolCore(payable(coreAddress));
         s_dataProvider = LendingPoolDataProvider(dataProviderAddress);
         s_feeProvider = IFeeProvider(feeProviderAddress);
         s_parametersProvider = LendingPoolParametersProvider(parametersProviderAddress);
@@ -947,5 +947,89 @@ contract LendingPool is ReentrancyGuard {
 
     function getLendingPoolAddressesProvider() external view returns (address) {
         return address(s_addressesProvider);
+    }
+
+    /**
+     * @dev accessory functions to fetch data from the core contract
+     *
+     */
+
+    function getReserveConfigurationData(address _reserve)
+        external
+        view
+        returns (
+            uint256 ltv,
+            uint256 liquidationThreshold,
+            uint256 liquidationBonus,
+            address interestRateStrategyAddress,
+            bool usageAsCollateralEnabled,
+            bool borrowingEnabled,
+            bool stableBorrowRateEnabled,
+            bool isActive
+        )
+    {
+        return s_dataProvider.getReserveConfigurationData(_reserve);
+    }
+
+    function getReserveData(address _reserve)
+        external
+        view
+        returns (
+            uint256 totalLiquidity,
+            uint256 availableLiquidity,
+            uint256 totalBorrowsStable,
+            uint256 totalBorrowsVariable,
+            uint256 liquidityRate,
+            uint256 variableBorrowRate,
+            uint256 stableBorrowRate,
+            uint256 averageStableBorrowRate,
+            uint256 utilizationRate,
+            uint256 liquidityIndex,
+            uint256 variableBorrowIndex,
+            address aTokenAddress,
+            uint40 lastUpdateTimestamp
+        )
+    {
+        return s_dataProvider.getReserveData(_reserve);
+    }
+
+    function getUserAccountData(address _user)
+        external
+        view
+        returns (
+            uint256 totalLiquidityETH,
+            uint256 totalCollateralETH,
+            uint256 totalBorrowsETH,
+            uint256 totalFeesETH,
+            uint256 availableBorrowsETH,
+            uint256 currentLiquidationThreshold,
+            uint256 ltv,
+            uint256 healthFactor
+        )
+    {
+        return s_dataProvider.getUserAccountData(_user);
+    }
+
+    function getUserReserveData(address _reserve, address _user)
+        external
+        view
+        returns (
+            uint256 currentATokenBalance,
+            uint256 currentBorrowBalance,
+            uint256 principalBorrowBalance,
+            uint256 borrowRateMode,
+            uint256 borrowRate,
+            uint256 liquidityRate,
+            uint256 originationFee,
+            uint256 variableBorrowIndex,
+            uint256 lastUpdateTimestamp,
+            bool usageAsCollateralEnabled
+        )
+    {
+        return s_dataProvider.getUserReserveData(_reserve, _user);
+    }
+
+    function getReserves() external view returns (address[] memory) {
+        return s_core.getReserves();
     }
 }

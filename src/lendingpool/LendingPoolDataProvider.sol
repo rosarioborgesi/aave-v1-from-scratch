@@ -27,6 +27,9 @@ import {LendingPoolAddressesProvider} from "src/configuration/LendingPoolAddress
 import {LendingPoolCore} from "./LendingPoolCore.sol";
 import {IPriceOracleGetter} from "src/interfaces/IPriceOracleGetter.sol";
 import {WadRayMath} from "src/libraries/WadRayMath.sol";
+import {AToken} from "src/tokenization/AToken.sol";
+import {CoreLibrary} from "src/libraries/CoreLibrary.sol";
+import {IFeeProvider} from "src/interfaces/IFeeProvider.sol";
 
 /**
  * @title LendingPoolDataProvider contract
@@ -108,7 +111,7 @@ contract LendingPoolDataProvider {
         if (coreAddress == address(0)) {
             revert LendingPoolDataProvider__ZeroAddress();
         }
-        i_core = LendingPoolCore(coreAddress);
+        i_core = LendingPoolCore(payable(coreAddress));
     }
 
     ////////////////////////////////
@@ -166,6 +169,36 @@ contract LendingPoolDataProvider {
     //////////////////////////////////////////////////////
     //     Private & Internal View & Pure Functions     //
     //////////////////////////////////////////////////////
+
+    /**
+     * @dev calculates the equivalent amount in ETH that an user can borrow, depending on the available collateral and the
+     * average Loan To Value.
+     * @param collateralBalanceETH the total collateral balance
+     * @param borrowBalanceETH the total borrow balance
+     * @param totalFeesETH the total fees
+     * @param ltv the average loan to value
+     * @return the amount available to borrow in ETH for the user
+     *
+     */
+
+    function _calculateAvailableBorrowsETH(
+        uint256 collateralBalanceETH,
+        uint256 borrowBalanceETH,
+        uint256 totalFeesETH,
+        uint256 ltv
+    ) internal view returns (uint256) {
+        uint256 availableBorrowsETH = collateralBalanceETH * ltv / 100; //ltv is in percentage
+
+        if (availableBorrowsETH < borrowBalanceETH) {
+            return 0;
+        }
+
+        availableBorrowsETH = availableBorrowsETH + totalFeesETH - borrowBalanceETH;
+        //calculate fee
+        uint256 borrowFee = IFeeProvider(i_addressesProvider.getFeeProvider())
+            .calculateLoanOriginationFee(msg.sender, availableBorrowsETH);
+        return availableBorrowsETH - borrowFee;
+    }
 
     //////////////////////////////////////////////////////
     //      External & Public View & Pure Functions     //
@@ -448,5 +481,135 @@ contract LendingPoolDataProvider {
             (_userCurrentBorrowBalanceETH + _userCurrentFeesETH + requestedBorrowAmountETH) * 100 / _userCurrentLtv; //LTV is calculated in percentage
 
         return collateralNeededInETH;
+    }
+
+    /**
+     * @dev accessory functions to fetch data from the lendingPoolCore
+     *
+     */
+    function getReserveConfigurationData(address _reserve)
+        external
+        view
+        returns (
+            uint256 ltv,
+            uint256 liquidationThreshold,
+            uint256 liquidationBonus,
+            address rateStrategyAddress,
+            bool usageAsCollateralEnabled,
+            bool borrowingEnabled,
+            bool stableBorrowRateEnabled,
+            bool isActive
+        )
+    {
+        (, ltv, liquidationThreshold, usageAsCollateralEnabled) = i_core.getReserveConfiguration(_reserve);
+        stableBorrowRateEnabled = i_core.getReserveIsStableBorrowRateEnabled(_reserve);
+        borrowingEnabled = i_core.isReserveBorrowingEnabled(_reserve);
+        isActive = i_core.getReserveIsActive(_reserve);
+        liquidationBonus = i_core.getReserveLiquidationBonus(_reserve);
+        rateStrategyAddress = i_core.getReserveInterestRateStrategyAddress(_reserve);
+    }
+
+    function getReserveData(address _reserve)
+        external
+        view
+        returns (
+            uint256 totalLiquidity,
+            uint256 availableLiquidity,
+            uint256 totalBorrowsStable,
+            uint256 totalBorrowsVariable,
+            uint256 liquidityRate,
+            uint256 variableBorrowRate,
+            uint256 stableBorrowRate,
+            uint256 averageStableBorrowRate,
+            uint256 utilizationRate,
+            uint256 liquidityIndex,
+            uint256 variableBorrowIndex,
+            address aTokenAddress,
+            uint40 lastUpdateTimestamp
+        )
+    {
+        totalLiquidity = i_core.getReserveTotalLiquidity(_reserve);
+        availableLiquidity = i_core.getReserveAvailableLiquidity(_reserve);
+        totalBorrowsStable = i_core.getReserveTotalBorrowsStable(_reserve);
+        totalBorrowsVariable = i_core.getReserveTotalBorrowsVariable(_reserve);
+        liquidityRate = i_core.getReserveCurrentLiquidityRate(_reserve);
+        variableBorrowRate = i_core.getReserveCurrentVariableBorrowRate(_reserve);
+        stableBorrowRate = i_core.getReserveCurrentStableBorrowRate(_reserve);
+        averageStableBorrowRate = i_core.getReserveCurrentAverageStableBorrowRate(_reserve);
+        utilizationRate = i_core.getReserveUtilizationRate(_reserve);
+        liquidityIndex = i_core.getReserveLiquidityCumulativeIndex(_reserve);
+        variableBorrowIndex = i_core.getReserveVariableBorrowsCumulativeIndex(_reserve);
+        aTokenAddress = i_core.getReserveATokenAddress(_reserve);
+        lastUpdateTimestamp = i_core.getReserveLastUpdate(_reserve);
+    }
+
+    function getUserAccountData(address _user)
+        external
+        view
+        returns (
+            uint256 totalLiquidityETH,
+            uint256 totalCollateralETH,
+            uint256 totalBorrowsETH,
+            uint256 totalFeesETH,
+            uint256 availableBorrowsETH,
+            uint256 currentLiquidationThreshold,
+            uint256 ltv,
+            uint256 healthFactor
+        )
+    {
+        (
+            totalLiquidityETH,
+            totalCollateralETH,
+            totalBorrowsETH,
+            totalFeesETH,
+            ltv,
+            currentLiquidationThreshold,
+            healthFactor,
+        ) = calculateUserGlobalData(_user);
+
+        availableBorrowsETH = _calculateAvailableBorrowsETH(totalCollateralETH, totalBorrowsETH, totalFeesETH, ltv);
+    }
+
+    function getUserReserveData(address _reserve, address _user)
+        external
+        view
+        returns (
+            uint256 currentATokenBalance,
+            uint256 currentBorrowBalance,
+            uint256 principalBorrowBalance,
+            uint256 borrowRateMode,
+            uint256 borrowRate,
+            uint256 liquidityRate,
+            uint256 originationFee,
+            uint256 variableBorrowIndex,
+            uint256 lastUpdateTimestamp,
+            bool usageAsCollateralEnabled
+        )
+    {
+        currentATokenBalance = AToken(i_core.getReserveATokenAddress(_reserve)).balanceOf(_user);
+        CoreLibrary.InterestRateMode mode = i_core.getUserCurrentBorrowRateMode(_reserve, _user);
+        (principalBorrowBalance, currentBorrowBalance,) = i_core.getUserBorrowBalances(_reserve, _user);
+
+        //default is 0, if mode == CoreLibrary.InterestRateMode.NONE
+        if (mode == CoreLibrary.InterestRateMode.STABLE) {
+            borrowRate = i_core.getUserCurrentStableBorrowRate(_reserve, _user);
+        } else if (mode == CoreLibrary.InterestRateMode.VARIABLE) {
+            borrowRate = i_core.getReserveCurrentVariableBorrowRate(_reserve);
+        }
+
+        borrowRateMode = uint256(mode);
+        liquidityRate = i_core.getReserveCurrentLiquidityRate(_reserve);
+        originationFee = i_core.getUserOriginationFee(_reserve, _user);
+        variableBorrowIndex = i_core.getUserVariableBorrowCumulativeIndex(_reserve, _user);
+        lastUpdateTimestamp = i_core.getUserLastUpdate(_reserve, _user);
+        usageAsCollateralEnabled = i_core.isUserUseReserveAsCollateralEnabled(_reserve, _user);
+    }
+
+    /**
+     * @dev returns the health factor liquidation threshold
+     *
+     */
+    function getHealthFactorLiquidationThreshold() external pure returns (uint256) {
+        return HEALTH_FACTOR_LIQUIDATION_THRESHOLD;
     }
 }
