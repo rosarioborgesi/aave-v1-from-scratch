@@ -96,6 +96,7 @@ are listed below.
 | Arithmetic safety | `SafeMath` was required | Native checked arithmetic is used | Solidity 0.8 reverts on integer overflow and underflow by default |
 | Revert handling | Mostly `require` statements and revert strings | `if` statements with custom errors | Makes failure cases explicit and reduces revert-data gas costs |
 | OpenZeppelin | OpenZeppelin Contracts `2.3.0` | OpenZeppelin Contracts `5.6.1` | Adapts the implementation to modern library APIs and security utilities |
+| Tests | The original repository's test suite | Independently authored Foundry tests created specifically for this project | Keeps the tests aligned with this rebuild's contracts, behavior, and educational goals without reusing the original tests |
 | aToken interest redirection | A deposit's accrued interest could be redirected to another address | Interest redirection is omitted | It adds substantial accounting complexity and was later removed from Aave |
 
 Stable-rate borrowing remains included, even if it has been deprecated in Aave V3, because it is useful for studying debt accounting and borrow-rate swaps.

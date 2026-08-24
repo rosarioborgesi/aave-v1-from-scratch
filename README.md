@@ -60,6 +60,7 @@ and accounting ideas while modernising or omitting historical complexity.
 | Arithmetic | `SafeMath` for overflow protection | Solidity 0.8 native checked arithmetic |
 | Errors | Predominantly `require` with revert strings | Explicit checks with custom errors where appropriate |
 | Dependencies | Historical OpenZeppelin APIs | Modern OpenZeppelin Contracts APIs |
+| Tests | Original repository's test suite | Independently authored Foundry tests created specifically for this project; the original tests are not reused |
 | aToken interest redirection | Supported redirecting accrued interest to another address | Omitted to keep aToken accounting focused and approachable |
 
 Stable-rate borrowing remains included because it is useful for studying debt
