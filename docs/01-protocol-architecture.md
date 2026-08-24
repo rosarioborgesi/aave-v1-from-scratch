@@ -1,428 +1,253 @@
-// TODO TO BE REVIEWED
-
 # Aave V1 Protocol Architecture
 
-Aave V1 is a pool-based lending protocol.
+Aave V1 is a pool-based lending protocol built from contracts with narrowly
+defined responsibilities. Users enter through a small public surface, while
+separate components maintain reserve accounting, evaluate risk, configure
+markets, calculate rates, and distribute protocol fees.
 
-Users do not lend directly to other users. Instead, lenders deposit assets into shared reserves, and borrowers borrow from those reserves by providing collateral.
-
-The protocol is composed of multiple smart contracts. Each contract has a specific responsibility. The goal of this architecture is to separate user actions, protocol state, configuration, tokenization, data aggregation, and interest rate calculation.
-
-This document explains the high-level role of each contract before diving deeper into their implementation.
+This page is a high-level catalog of the contracts in this educational rebuild.
+It explains what each component is responsible for and how the components fit
+together. Detailed transaction flows are covered by the operation-specific
+pages elsewhere in this documentation.
 
 ![Aave V1 Protocol Architecture](../images/aave-v1-protocol-architecture.jpg)
 
-_Source: Aave Protocol Whitepaper v1.0_
+_Source: Aave Protocol Whitepaper v1.0. The diagram provides historical
+context; the catalog below describes the contracts implemented in this
+repository._
 
-## High-Level Architecture
+## Main Protocol Contracts
 
-At a high level, the protocol can be divided into four main areas:
+### `LendingPool`
 
-1. User-facing contracts
-2. Core accounting and reserve state
-3. Configuration and administration
-4. Supporting contracts and libraries
+[`LendingPool`](../src/lendingpool/LendingPool.sol) is the main entry point for
+protocol users. It exposes the lending operations, performs action-level
+validation, and coordinates the contracts that own accounting and risk data.
 
-The most important thing to understand is that users do not interact directly with every contract.
+The pool relies primarily on `LendingPoolCore` for reserve and user state,
+`LendingPoolDataProvider` for account-level risk calculations, and the
+Addresses Provider for the other active protocol components. It orchestrates
+fund movement but does not hold reserve liquidity itself.
 
-Most user actions go through `LendingPool`.
+### `LendingPoolCore`
 
-`LendingPool` then coordinates with the other contracts.
+[`LendingPoolCore`](../src/lendingpool/LendingPoolCore.sol) is the protocol's
+accounting and custody component. It holds the underlying assets available to
+the reserves and stores reserve-level and user-level state, including debt,
+collateral usage, indexes, rates, and market configuration.
 
-## User-Facing Layer
+The core applies accounting transitions requested by authorized protocol
+contracts, moves assets into and out of reserves, and asks each reserve's
+interest-rate strategy to refresh its rates. Higher-level policy checks remain
+in components such as `LendingPool` and `LendingPoolDataProvider`.
 
-### LendingPool
+### `LendingPoolDataProvider`
 
-`LendingPool` is the main entry point for users.
+[`LendingPoolDataProvider`](../src/lendingpool/LendingPoolDataProvider.sol)
+turns low-level Core data into reserve and account-level views. It combines
+positions across reserves, values them through the Price Oracle, and derives
+risk information such as borrowing capacity, weighted collateral parameters,
+and health factor.
 
-Users interact with this contract when they want to perform protocol actions such as:
+`LendingPool`, `AToken`, and `LendingPoolLiquidationManager` use these
+calculations when an action could change the safety of a user's position. The
+contract reads and calculates data; it does not custody liquidity.
 
-* deposit
-* redeem
-* borrow
-* repay
-* swap borrow rate
-* liquidation
-* flash loan
+### `AToken`
 
-For example, when a user deposits DAI, they call:
+[`AToken`](../src/tokenization/AToken.sol) is the interest-bearing ERC-20 token
+associated with a reserve. It represents a supplier's claim on that reserve's
+underlying liquidity and uses the Core's normalized income to expose accrued
+interest in token balances.
 
-```solidity
-deposit(address reserve, uint256 amount, uint16 referralCode)
-```
+The pool controls protocol-specific minting, burning, and liquidation hooks.
+Normal token movements also consult protocol risk data so that transferring a
+collateral position cannot leave an account below the required safety level.
+The underlying reserve asset remains in `LendingPoolCore`, not in the aToken.
 
-on the `LendingPool`.
+### `LendingPoolLiquidationManager`
 
-The `LendingPool` does not hold all the protocol state itself. Instead, it coordinates the action by calling other contracts.
+[`LendingPoolLiquidationManager`](../src/lendingpool/LendingPoolLiquidationManager.sol)
+contains the specialized logic for resolving undercollateralized positions.
+It determines how much debt may be covered and how much collateral may be
+claimed, then coordinates the required Core and aToken accounting.
 
-So `LendingPool` is user-facing, but it is not the place where all the funds and reserve data are stored.
+`LendingPool` reaches this component through the manager address registered in
+the Addresses Provider and executes its liquidation logic by `delegatecall`.
+Separating this logic keeps the pool's main user-facing contract smaller while
+preserving a single external entry point.
 
-## Core State Layer
+## Configuration and Registry Contracts
 
-### LendingPoolCore
+### `LendingPoolAddressesProvider`
 
-`LendingPoolCore` is the core accounting contract of the protocol.
+[`LendingPoolAddressesProvider`](../src/configuration/LendingPoolAddressesProvider.sol)
+is the central registry for active protocol components. It records addresses
+for the pool, Core, data provider, configurator, liquidation manager, parameter
+and fee providers, oracles, token distributor, and lending-pool manager.
 
-It holds:
+Protocol contracts use this registry instead of hard-coding every collaborator.
+The registry owner controls its entries, while the registered lending-pool
+manager is a separate administrative role used by the configurator. The
+lending-pool manager is an address-based role in this repository, not a
+dedicated implemented contract.
 
-* reserve data
-* user reserve data
-* reserve balances
-* deposited assets
-* liquidity indexes
-* borrow indexes
-* interest rate data
+### `AddressStorage`
 
-This contract is not meant to be the main user-facing contract.
+[`AddressStorage`](../src/configuration/AddressStorage.sol) is the small storage
+base inherited by the Addresses Provider. It supplies the generic keyed mapping
+used to register and retrieve component addresses. It is an implementation
+building block rather than a user-facing protocol service.
 
-Users normally do not call `LendingPoolCore` directly. Instead, `LendingPool` calls it during protocol actions.
+### `LendingPoolConfigurator`
 
-For example, during a deposit:
+[`LendingPoolConfigurator`](../src/lendingpool/LendingPoolConfigurator.sol) is
+the administrative gateway for reserve management. It initializes supported
+markets and their aTokens and controls reserve activation, freezing, borrowing
+modes, collateral parameters, decimals, and interest-rate strategies.
 
-1. `LendingPool` calls `updateStateOnDeposit()`
-2. `LendingPoolCore` updates reserve indexes and interest rates
-3. `LendingPoolCore` marks the reserve as collateral for the user if this is the first deposit
-4. `LendingPoolCore` receives the underlying asset from the user
+Only the lending-pool manager registered in the Addresses Provider may invoke
+its configuration operations. The configurator delegates the resulting state
+changes to `LendingPoolCore`, whose configuration methods accept calls only
+from the registered configurator.
 
-## Data Layer
+### `LendingPoolParametersProvider`
 
-### LendingPoolDataProvider
+[`LendingPoolParametersProvider`](../src/configuration/LendingPoolParametersProvider.sol)
+exposes protocol-wide operational parameters used by `LendingPool` and the
+liquidation logic. In this implementation those parameters cover stable-borrow
+limits, stable-rate rebalancing, and flash-loan fee settings.
 
-`LendingPoolDataProvider` is used to aggregate and calculate higher-level data.
+Unlike reserve-specific risk configuration, these values apply to pool behavior
+across markets. The current contract exposes fixed constants rather than
+mutable governance settings.
 
-It reads data from `LendingPoolCore` and exposes information needed by `LendingPool`.
+## Rates and Price Contracts
 
-For example, it can calculate:
+### `DefaultReserveInterestRateStrategy`
 
-* user collateral balance
-* user borrow balance
-* user liquidity balance
-* health factor
-* average loan-to-value
-* average liquidation threshold
+[`DefaultReserveInterestRateStrategy`](../src/lendingpool/DefaultReserveInterestRateStrategy.sol)
+is the default per-reserve interest-rate model. It derives the liquidity,
+stable-borrow, and variable-borrow rates from available liquidity, outstanding
+debt, utilization, and configured rate-curve parameters.
 
-The reason this contract exists is to keep `LendingPoolCore` focused on low-level reserve state, while more complex data calculations are moved to a separate contract.
-
-This separation makes the architecture easier to reason about:
-
-```text
-LendingPoolCore = stores state
-LendingPoolDataProvider = reads and aggregates state
-LendingPool = uses the data to execute user actions
-```
-
-In the first simplified version of this project, we may not need the full `LendingPoolDataProvider` yet. It becomes more important when implementing borrowing, collateral checks, health factor, and liquidations.
-
-## Tokenization Layer
-
-### AToken
-
-`AToken` represents a user's deposited position.
-
-When a user deposits an underlying asset into the protocol, they receive the corresponding aToken.
-
-Example:
-
-```text
-Deposit 100 DAI
-Receive 100 aDAI
-```
-
-aTokens are ERC20 tokens.
-
-They represent the user's claim on the underlying reserve.
-
-In Aave V1, aTokens are also interest-bearing. This means the user's aToken balance can grow over time as interest accrues.
-
-The aToken contract keeps track of:
-
-* user principal balance
-* user index
-* redirected interest balances
-* interest redirection addresses
-
-For the first simplified version, the most important behavior is:
-
-```text
-deposit underlying asset -> mint aToken
-```
-
-So during a deposit:
-
-```solidity
-aToken.mintOnDeposit(user, amount);
-```
-
-is called by the `LendingPool`.
-
-The `AToken` should only allow the `LendingPool` to mint on deposit.
-
-## Configuration Layer
-
-### LendingPoolConfigurator
-
-`LendingPoolConfigurator` is responsible for protocol configuration.
-
-It is not a normal user-facing contract.
-
-It is used by governance or protocol administrators to configure reserves.
-
-Its responsibilities include:
-
-* initialize a reserve
-* configure a reserve
-* enable or disable borrowing
-* enable or disable stable borrowing
-* enable or disable a reserve as collateral
-* update reserve parameters
-* remove a recently added reserve
-
-For example, before users can deposit DAI, the DAI reserve must be initialized.
-
-A simplified reserve initialization flow is:
-
-```text
-Configurator
-  |
-  | initReserve()
-  v
-LendingPoolCore
-  |
-  | stores aToken address
-  | stores interest rate strategy
-  | initializes indexes
-  | marks reserve as active
-  v
-Reserve ready
-```
-
-In our implementation, we may temporarily call `initReserve()` directly on `LendingPoolCore` while building the first version. Later, this should be controlled through `LendingPoolConfigurator`.
-
-## Interest Rate Layer
-
-### InterestRateStrategy
-
-Each reserve has an interest rate strategy.
-
-The interest rate strategy is responsible for calculating:
-
-* liquidity rate
-* stable borrow rate
-* variable borrow rate
-
-The strategy uses reserve data such as:
-
-* available liquidity
-* total stable borrows
-* total variable borrows
-* average stable borrow rate
-* utilization rate
-
-The `LendingPoolCore` calls the interest rate strategy when reserve rates need to be updated.
-
-For example, after a deposit, available liquidity changes.
-
-So the protocol updates the reserve interest rates.
-
-A simplified flow is:
-
-```text
-Deposit happens
-  |
-  v
-LendingPoolCore updates reserve state
-  |
-  v
-InterestRateStrategy calculates new rates
-  |
-  v
-LendingPoolCore stores updated rates
-```
-
-The interest rate strategy does not hold user funds.
-
-It only calculates rates.
-
-## Oracle Layer
+`LendingPoolCore` invokes the strategy when reserve conditions change and
+stores the resulting rates. The strategy reads the Lending Rate Oracle for the
+market rate used as the stable-rate baseline; it calculates rates but holds no
+funds or user positions.
 
 ### Price Oracle
 
-The price oracle provides asset prices.
+The Price Oracle supplies asset prices in a common reference unit. The
+`LendingPoolDataProvider` and liquidation logic use those prices to compare
+collateral, debt, and fees across different reserve assets.
 
-The protocol needs prices to calculate user account data such as:
-
-* collateral value
-* borrow value
-* health factor
-* liquidation conditions
-
-For example, if a user deposits DAI and borrows ETH, the protocol needs to know the value of both assets in a common unit.
-
-The price oracle is especially important for borrowing and liquidations.
+This repository defines the oracle boundary through
+[`IPriceOracleGetter`](../src/interfaces/IPriceOracleGetter.sol) and
+[`IPriceOracle`](../src/interfaces/IPriceOracle.sol). The active oracle address
+is registered in the Addresses Provider; a concrete production oracle is an
+external dependency rather than an implementation in `src`.
 
 ### Lending Rate Oracle
 
-The lending rate oracle provides external market rate information.
+The Lending Rate Oracle supplies an asset-specific market borrowing rate used
+as the baseline for stable borrowing. Interest-rate strategies and the Core
+read it through
+[`ILendingRateOracle`](../src/interfaces/ILendingRateOracle.sol), and the
+Addresses Provider selects the active implementation.
 
-This can be used by the protocol when calculating or comparing lending and borrowing rates.
+As with the Price Oracle, this repository defines the integration interface but
+does not provide a concrete oracle implementation.
 
-In the first simplified version of this project, we can ignore the oracle layer until we implement borrowing, collateral valuation, and liquidations.
+## Fees and Distribution Contracts
 
-## Liquidation Layer
+### `FeeProvider`
 
-### LiquidationManager
+[`FeeProvider`](../src/fees/FeeProvider.sol) calculates the protocol-wide loan
+origination fee. `LendingPool` and `LendingPoolDataProvider` use it when
+validating and recording borrowed positions.
 
-The `LiquidationManager` handles liquidation logic.
+The provider is a calculator only: it neither custodies fees nor distributes
+them. Its address is resolved through the Addresses Provider.
 
-A liquidation happens when a borrower's health factor becomes too low.
+### `TokenDistributor`
 
-Liquidators interact with the protocol to repay part of the user's debt and receive part of the collateral in return.
+[`TokenDistributor`](../src/fees/TokenDistributor.sol) is the destination and
+distribution mechanism for protocol fees. It can hold ERC-20 assets and native
+ETH and split them among the recipients configured at deployment.
 
-In the architecture diagram, liquidation is connected to `LendingPool`, but the liquidation logic itself is separated into `LiquidationManager`.
+Protocol components obtain its address from the Addresses Provider when
+routing origination and flash-loan protocol fees. Distribution may be
+triggered permissionlessly, but callers cannot change the configured
+recipients or their shares.
 
-This keeps the `LendingPool` from becoming too large.
+## Flash-Loan Integration Contracts
 
-In the first simplified version, liquidations are out of scope.
+### `IFlashLoanReceiver`
 
-## Libraries
+[`IFlashLoanReceiver`](../src/flashloan/interfaces/IFlashLoanReceiver.sol)
+defines the callback that a flash-loan receiver must implement. `LendingPool`
+uses this boundary to hand control to the receiver during a flash loan and then
+verifies that the reserve has been repaid before completing the transaction.
 
-### CoreLibrary
+Receiver contracts are integrations supplied by protocol users or developers;
+they are not trusted accounting components of the lending pool.
 
-`CoreLibrary` contains important reserve and user accounting logic.
+### `FlashLoanReceiverBase`
 
-It defines structures such as:
+[`FlashLoanReceiverBase`](../src/flashloan/base/FlashLoanReceiverBase.sol) is an
+optional abstract base for building receiver contracts. It implements shared
+helpers for identifying the current Core, reading balances, and returning
+ERC-20 assets or native ETH to the pool.
 
-```solidity
-ReserveData
-UserReserveData
-```
+The base is developer-facing support code. A concrete receiver must still
+implement its own callback behavior through `IFlashLoanReceiver`.
 
-It also contains logic for:
+## Libraries and Interfaces
 
-* updating cumulative indexes
-* calculating normalized income
-* calculating linear interest
-* calculating compounded interest
-* calculating user borrow balances
+### `CoreLibrary`
 
-The library is used by `LendingPoolCore`.
+[`CoreLibrary`](../src/libraries/CoreLibrary.sol) defines the reserve and user
+data structures used by `LendingPoolCore` and contains the accounting routines
+that operate on them. Its responsibilities include interest accrual, normalized
+balances, debt calculations, indexes, and reserve configuration flags.
 
-This keeps mathematical and accounting logic separated from the main storage contract.
+Keeping this logic in a library separates the accounting model from the Core
+contract that owns the corresponding storage and assets.
 
-### WadRayMath
+### `WadRayMath`
 
-`WadRayMath` is used for fixed-point math.
+[`WadRayMath`](../src/libraries/WadRayMath.sol) provides the fixed-point
+arithmetic used throughout the protocol. Wad precision is used for token-scale
+values, while ray precision supports high-precision rates and cumulative
+indexes.
 
-Solidity does not support decimal numbers natively, so Aave uses integer-based fixed-point units:
+### `EthAddressLib`
 
-```text
-WAD = 1e18
-RAY = 1e27
-```
+[`EthAddressLib`](../src/libraries/EthAddressLib.sol) defines the sentinel
+address used to represent native ETH wherever the same protocol path must also
+support ERC-20 reserve addresses.
 
-WAD is commonly used for token amounts and ratios with 18 decimals.
+### Protocol interfaces
 
-RAY is used for higher precision values such as indexes and interest rates.
+The interfaces under [`src/interfaces`](../src/interfaces/) define the
+boundaries between replaceable or externally supplied components, including
+the Addresses Provider, fee provider, oracles, liquidation manager, and
+interest-rate strategies. They describe how contracts collaborate without
+requiring callers to depend on concrete implementations.
 
-Examples:
+## Interaction and Access Summary
 
-```text
-1 ray = 1e27
-5% annual rate = 0.05e27 = 5e25
-```
+| Category | Components | Role |
+| --- | --- | --- |
+| User-facing | `LendingPool`, `AToken` | Expose lending actions and tokenized supplier positions. |
+| Accounting and risk | `LendingPoolCore`, `LendingPoolDataProvider`, `LendingPoolLiquidationManager` | Hold funds and state, derive account safety, and resolve unhealthy positions. |
+| Administrative | `LendingPoolAddressesProvider`, `LendingPoolConfigurator`, lending-pool manager role | Register components and control reserve configuration. |
+| Economic services | `LendingPoolParametersProvider`, `DefaultReserveInterestRateStrategy`, oracles, `FeeProvider`, `TokenDistributor` | Supply parameters, rates, prices, fee calculations, and fee distribution. |
+| Integration-facing | `IFlashLoanReceiver`, `FlashLoanReceiverBase` | Define and support external flash-loan receivers. |
+| Internal building blocks | `AddressStorage`, `CoreLibrary`, `WadRayMath`, `EthAddressLib`, protocol interfaces | Provide storage, accounting, math, asset representation, and contract boundaries. |
 
-The protocol uses ray precision for values like:
-
-* liquidity index
-* variable borrow index
-* normalized income
-* interest rates
-
-## Who Can Call What?
-
-Not every contract is meant to be called by users.
-
-### Usually User-Facing
-
-Users mainly interact with:
-
-```text
-LendingPool
-AToken
-```
-
-`LendingPool` is used for protocol actions.
-
-`AToken` is an ERC20 token, so users can read balances and may transfer aTokens depending on protocol rules.
-
-### Usually Protocol/Internal
-
-These contracts are usually called by other protocol contracts:
-
-```text
-LendingPoolCore
-LendingPoolDataProvider
-InterestRateStrategy
-CoreLibrary
-WadRayMath
-```
-
-`LendingPoolCore` stores important protocol state and should not expose sensitive state-changing functions to random users.
-
-`CoreLibrary` and `WadRayMath` are libraries, so users do not call them directly.
-
-### Usually Admin/Governance
-
-These contracts are controlled by governance or protocol administration:
-
-```text
-LendingPoolConfigurator
-AddressesProvider
-Oracle configuration
-```
-
-The configurator can change reserve parameters, so it must be restricted.
-
-## AddressesProvider
-
-The `LendingPoolAddressesProvider` acts as the protocol registry.
-
-It stores the addresses of important protocol contracts, such as:
-
-* LendingPool
-* LendingPoolCore
-* LendingPoolConfigurator
-* LendingPoolDataProvider
-* PriceOracle
-* LendingRateOracle
-
-Instead of hardcoding addresses everywhere, contracts can read the current address from the provider.
-
-This makes the architecture more flexible.
-
-For example:
-
-```solidity
-address core = addressesProvider.getLendingPoolCore();
-```
-
-The provider is especially useful because different protocol components need to know where the other components are.
-
-Internally, the provider inherits from `AddressStorage`.
-
-`AddressStorage` contains the generic mapping:
-
-```solidity
-mapping(bytes32 => address) private s_addresses;
-```
-
-The provider then uses fixed keys like `LENDING_POOL`, `LENDING_POOL_CORE`, and `LENDING_POOL_CONFIGURATOR` to store and read each address.
-
-For example:
-
-```solidity
-_setAddress(LENDING_POOL_CORE, coreAddress);
-address core = getAddress(LENDING_POOL_CORE);
-```
-
-So `AddressStorage` handles the generic key-value storage, while `LendingPoolAddressesProvider` exposes clearer protocol-specific functions such as `setLendingPoolCore()` and `getLendingPoolCore()`.
+The central relationship is that `LendingPool` coordinates user actions,
+`LendingPoolCore` owns reserve state and liquidity, and the remaining contracts
+supply the risk, configuration, pricing, rate, fee, and integration services
+needed to operate the protocol safely.
