@@ -48,69 +48,64 @@ library CoreLibrary {
     ///////////////////////////////////////////
     //            Type Declarations          //
     ///////////////////////////////////////////
+    // Stores a user's borrowing and collateral settings for a specific reserve.
     struct UserReserveData {
-        //principal amount borrowed by the user.
+        // Principal amount currently borrowed by the user, in the reserve asset's decimals.
         uint256 principalBorrowBalance;
-        //cumulated variable borrow index for the user. Expressed in ray
+        // Variable-borrow index recorded when the user's debt was last updated, expressed in ray.
         uint256 lastVariableBorrowCumulativeIndex;
-        //origination fee cumulated by the user
+        // Cumulative origination fee owed by the user, in the reserve asset's decimals.
         uint256 originationFee;
-        // stable borrow rate at which the user has borrowed. Expressed in ray
+        // Stable annual borrow rate for the user's debt, expressed in ray.
         uint256 stableBorrowRate;
+        // Unix timestamp of the user's most recent reserve-data update.
         uint40 lastUpdateTimestamp;
-        //defines if a specific deposit should or not be used as a collateral in borrows
+        // Whether the user's deposit in this reserve is enabled as collateral.
         bool useAsCollateral;
     }
 
+    // Stores the global accounting, configuration, and interest-rate state for a reserve.
     struct ReserveData {
-        /**
-         * @dev refer to the whitepaper, section 1.1 basic concepts for a formal description of these properties.
-         *
-         */
-        //the liquidity index. Expressed in ray
+        /// @dev See whitepaper section 1.1, “Basic concepts,” for a formal description of these properties.
+        // Cumulative liquidity index used to account for supplier income, expressed in ray.
         uint256 lastLiquidityCumulativeIndex;
-        //the current supply rate. Expressed in ray
+        // Current annual liquidity rate paid to suppliers, expressed in ray.
         uint256 currentLiquidityRate;
-        //the total borrows of the reserve at a stable rate. Expressed in the currency decimals
+        // Total outstanding stable-rate debt, in the reserve asset's decimals.
         uint256 totalBorrowsStable;
-        //the total borrows of the reserve at a variable rate. Expressed in the currency decimals
+        // Total outstanding variable-rate debt, in the reserve asset's decimals.
         uint256 totalBorrowsVariable;
-        //the current variable borrow rate. Expressed in ray
+        // Current annual variable borrow rate, expressed in ray.
         uint256 currentVariableBorrowRate;
-        //the current stable borrow rate. Expressed in ray
+        // Current annual stable borrow rate, expressed in ray.
         uint256 currentStableBorrowRate;
-        //the current average stable borrow rate (weighted average of all the different stable rate loans). Expressed in ray
+        // Weighted-average annual stable borrow rate across all stable-rate debt, expressed in ray.
         uint256 currentAverageStableBorrowRate;
-        //variable borrow index. Expressed in ray
+        // Cumulative variable-borrow index used to account for variable-rate debt, expressed in ray.
         uint256 lastVariableBorrowCumulativeIndex;
-        //the ltv of the reserve. Expressed in percentage (0-100)
+        // Maximum loan-to-value when the reserve asset is collateral, expressed as a percentage from 0 to 100.
         uint256 baseLTVasCollateral;
-        //the liquidation threshold of the reserve. Expressed in percentage (0-100)
+        // Collateral value threshold below which a position becomes liquidatable, expressed as a percentage from 0 to 100.
         uint256 liquidationThreshold;
-        //the liquidation bonus of the reserve. Expressed in percentage
+        // Bonus awarded to liquidators, expressed as a percentage.
         uint256 liquidationBonus;
-        //the decimals of the reserve asset
+        // Number of decimals used by the reserve asset.
         uint256 decimals;
-        /**
-         * @dev address of the aToken representing the asset
-         *
-         */
+        // Address of the aToken representing deposits of the reserve asset.
         address aTokenAddress;
-        /**
-         * @dev address of the interest rate strategy contract
-         *
-         */
+        // Address of the interest-rate strategy contract for this reserve.
         address interestRateStrategyAddress;
+        // Unix timestamp of the reserve's most recent update.
         uint40 lastUpdateTimestamp;
-        // borrowingEnabled = true means users can borrow from this reserve
+        // Whether users can borrow this reserve asset.
         bool borrowingEnabled;
-        // usageAsCollateralEnabled = true means users can use this reserve as collateral
+        // Whether this reserve asset can be used as collateral.
         bool usageAsCollateralEnabled;
-        // isStableBorrowRateEnabled = true means users can borrow at a stable rate
+        // Whether stable-rate borrowing is enabled for this reserve.
         bool isStableBorrowRateEnabled;
-        // isActive = true means the reserve has been activated and properly configured
+        // Whether this reserve has been activated and configured.
         bool isActive;
-        // isFreezed = true means the reserve only allows repays and redeems, but not deposits, new borrowings or rate swap
+        // Whether the reserve is frozen, allowing only repayments and redemptions.
         bool isFreezed;
     }
 
@@ -237,17 +232,21 @@ library CoreLibrary {
     function updateCumulativeIndexes(ReserveData storage _self) internal {
         uint256 totalBorrows = getTotalBorrows(_self);
 
+        // With no debt outstanding (totalBorrowsStable + totalBorrowsVariable),
+        // the reserve earns no borrower-paid interest, so both indexes remain unchanged
         if (totalBorrows > 0) {
-            // TODO Add the formulas here
-            // Only cumulating of there is any income being produced
+            // The liquidity index tracks depositor's accumulated income.
+            // It applies the current liquidity rate with linear interest:
+            // newLiquidityIndex = oldLiquidityIndex x (1 + liquidityRate x elapsedYears)
             uint256 cumulatedLiquidityInterest =
                 calculateLinearInterest(_self.currentLiquidityRate, _self.lastUpdateTimestamp);
-
             _self.lastLiquidityCumulativeIndex = cumulatedLiquidityInterest.rayMul(_self.lastLiquidityCumulativeIndex);
 
+            // The variable-borrow index tracks the growth of variable-rate debt.
+            // It applies per-second compound interest
+            // newVariableBorrowIndex = oldVariableBorrowIndex x ((1 + variablerate / secondsPerYear) ^ elapsedSeconds)
             uint256 cumulatedVariableBorrowInterest =
                 calculateCompoundedInterest(_self.currentVariableBorrowRate, _self.lastUpdateTimestamp);
-
             _self.lastVariableBorrowCumulativeIndex =
                 cumulatedVariableBorrowInterest.rayMul(_self.lastVariableBorrowCumulativeIndex);
         }
@@ -432,7 +431,7 @@ library CoreLibrary {
         // Fraction of a year elapsed, expressed in ray.
         uint256 timeDelta = timeDifference.wadToRay().rayDiv(SECONDS_PER_YEAR.wadToRay());
 
-        // Linear interest factor: 1 + annualRate * elapsedYearFraction.
+        // Linear interest: 1 + annualRate * elapsedYearFraction.
         return _rate.rayMul(timeDelta) + WadRayMath.ray();
     }
 

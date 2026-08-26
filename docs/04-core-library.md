@@ -190,6 +190,8 @@ Using linear interest, her position would grow approximately to:
 
 The rate can change whenever the reserve state changes because it depends on factors such as available liquidity and total borrowed liquidity.
 
+The `currentLiquidityRate` is set by `InterestRateStrategy` contract in `LendingPoolCore._updateReserveInterestRatesAndTimestamp`
+
 ---
 
 ### totalBorrowsStable
@@ -289,6 +291,9 @@ The exact result depends on the compounded-interest implementation and rounding.
 
 The variable rate can change over time as reserve utilization changes.
 
+The `currentVariableBorrowRate` is set by `InterestRateStrategy` contract in `LendingPoolCore._updateReserveInterestRatesAndTimestamp`.
+
+
 ---
 
 ### currentStableBorrowRate
@@ -312,6 +317,8 @@ stableBorrowRate = 7%
 ```
 
 If the reserve later offers a stable rate of 9%, Alice's existing position does not automatically become 9%. Her user-specific stable borrow rate remains the rate associated with her position unless the protocol updates or rebalances it.
+
+The `currentStableBorrowRate` is set by `InterestRateStrategy` contract in `LendingPoolCore._updateReserveInterestRatesAndTimestamp`
 
 ---
 

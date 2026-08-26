@@ -14,7 +14,7 @@ cd aave-v1-from-scratch
 We use OpenZeppelin for standard ERC20 contracts.
 
 ```bash
-forge install OpenZeppelin/openzeppelin-contracts
+forge install openzeppelin/openzeppelin-contracts
 ```
 
 ## Foundry Configuration

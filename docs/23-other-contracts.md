@@ -46,9 +46,9 @@ Important details:
 
 [`DefaultReserveInterestRateStrategy.sol`](../src/lendingpool/DefaultReserveInterestRateStrategy.sol) is Aave’s per-reserve interest-rate model. Given pool liquidity and outstanding debt, it returns:
 
-1. The rate paid by borrowers choosing a stable rate.
-2. The rate paid by variable-rate borrowers.
-3. The liquidity/supply rate earned by depositors.
+1. The rate paid by borrowers choosing a stable rate. (`CoreLibrary.currentStableBorrowRate`) 
+2. The rate paid by variable-rate borrowers. (`CoreLibrary.currentVariableBorrowRate`)
+3. The liquidity/supply rate earned by depositors. (`CoreLibrary.currentLiquidityRate`)
 
 All rates use “ray” fixed-point units: `1e27 = 100%` (so `0.05e27` is 5%).
 

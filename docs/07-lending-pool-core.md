@@ -20,17 +20,17 @@ LendingPoolCore
     = stores protocol state, updates accounting, and holds funds
 ```
 
-`LendingPool` is responsible for checking whether an action is allowed. `LendingPoolCore` assumes that those checks have already happened and applies the corresponding state changes.
+`LendingPool` performs the protocol-level eligibility checks, such as whether a user can borrow or withdraw. `LendingPoolCore` is restricted to calls from `LendingPool` (or, for configuration, `LendingPoolConfigurator`) and applies the resulting accounting and custody updates. It still enforces its own access-control and transfer-related invariants.
 
 # Main Responsibilities
 
-The current implementation of `LendingPoolCore` has four main responsibilities:
+At a high level, the current implementation of `LendingPoolCore` has four main responsibilities:
 
 ```text
 1. Store global data for every reserve.
 2. Store user-specific data for every reserve.
 3. Hold deposited ERC20 tokens and ETH.
-4. Update reserve indexes and interest rates when liquidity changes.
+4. Update reserve indexes, debt accounting, and interest rates as reserve liquidity or borrowing changes.
 ```
 
 It also manages reserve initialization and exposes read functions used by other protocol components.
@@ -99,6 +99,8 @@ use-as-collateral preference
 ```
 
 A user therefore has separate state for every reserve they use.
+
+This mapping does not store a user's deposited balance. Deposited balances are represented by the reserve's aToken contract; `s_usersReserveData` stores the user's borrow-related accounting and collateral preference.
 
 ## `s_reservesList`
 

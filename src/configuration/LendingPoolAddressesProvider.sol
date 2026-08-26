@@ -49,7 +49,7 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
     bytes32 private constant LENDING_POOL_LIQUIDATION_MANAGER = "LIQUIDATION_MANAGER";
     //bytes32 private constant LENDING_POOL_FLASHLOAN_PROVIDER = "FLASHLOAN_PROVIDER";
     bytes32 private constant DATA_PROVIDER = "DATA_PROVIDER";
-    //bytes32 private constant ETHEREUM_ADDRESS = "ETHEREUM_ADDRESS";    
+    //bytes32 private constant ETHEREUM_ADDRESS = "ETHEREUM_ADDRESS";
     bytes32 private constant PRICE_ORACLE = "PRICE_ORACLE";
     bytes32 private constant LENDING_RATE_ORACLE = "LENDING_RATE_ORACLE";
     bytes32 private constant FEE_PROVIDER = "FEE_PROVIDER";
@@ -132,7 +132,6 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
         emit LendingRateOracleUpdated(_lendingRateOracle);
     }
 
-    
     function setLendingPoolManager(address _lendingPoolManager) external onlyOwner {
         _setAddress(LENDING_POOL_MANAGER, _lendingPoolManager);
         emit LendingPoolManagerUpdated(_lendingPoolManager);
