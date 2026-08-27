@@ -175,6 +175,46 @@ The `currentReserveIndex` represents the current reserve-wide growth.
 
 The `userIndex` represents the reserve index when the user's balance was last updated.
 
+### Worked Example: Linear Interest and Indexes Give the Same Result
+
+Suppose the reserve liquidity index is `1.05` when Alice deposits `100 DAI`. The liquidity rate is `5%` for the next full year. Calculating Alice's balance directly with linear interest gives the following result:
+
+```text
+A = P(1 + r * t)
+A = 100 * (1 + 0.05 * 1)
+A = 105 DAI
+```
+
+The index-based calculation reaches the same result. During that year, the reserve index grows by the same linear factor, from `1.05` to `1.05 * (1 + 0.05 * 1) = 1.1025`. Alice's checkpoint is `1.05`, because that was the index when she deposited:
+
+```text
+currentBalance = principalBalance * currentReserveIndex / userIndex
+currentBalance = 100 * 1.1025 / 1.05
+currentBalance = 105 DAI
+```
+
+The index ratio, `1.1025 / 1.05`, is `1.05`: the same one-year, 5% linear-interest growth factor. The indexes do not change the interest Alice earns; they let the protocol apply that calculation lazily, without updating her balance every moment.
+
+### Worked Example: Compound Interest and the Variable-Debt Index
+
+The variable-borrow index uses compound interest. Suppose the variable-borrow index is `1.05` when Alice borrows `100 DAI`, and her variable borrow rate is `5%` for the next two full years. Calculating her debt directly with compound interest gives:
+
+```text
+A = P(1 + r)^t
+A = 100 * (1 + 0.05)^2
+A = 110.25 DAI
+```
+
+The variable-borrow index applies the same compound growth factor. Over those two years, it grows from `1.05` to `1.05 * (1 + 0.05)^2 = 1.157625`. Alice's variable-borrow checkpoint is `1.05`, because that was the index when she borrowed:
+
+```text
+currentDebt = principalDebt * currentVariableBorrowIndex / userVariableBorrowIndex
+currentDebt = 100 * 1.157625 / 1.05
+currentDebt = 110.25 DAI
+```
+
+The index ratio, `1.157625 / 1.05`, is `1.1025`: the same two-year, 5% compound-interest growth factor. Just like the liquidity index for deposits, the variable-borrow index produces the ordinary interest result while avoiding continuous updates to each borrower's stored debt.
+
 Suppose all three users entered when the index was `1.00`, and the current reserve index is `1.05`.
 
 ## Alice
@@ -368,6 +408,12 @@ new variable-borrow index = old variable-borrow index × compound interest facto
 ```
 
 A variable-rate borrower's current debt is calculated from their stored principal, the current variable-borrow index, and their personal variable-borrow checkpoint index. The two global indexes are checkpointed together, but they have different roles: `lastLiquidityCumulativeIndex` tracks supplier income with linear interest, while `lastVariableBorrowCumulativeIndex` tracks variable debt with compound interest. Stable-rate debt is tracked separately using the borrower's stable rate, not this index.
+
+## Why the Cumulative Indexes Never Decrease
+
+`lastLiquidityCumulativeIndex` and `lastVariableBorrowCumulativeIndex` are cumulative growth factors. Whenever `updateCumulativeIndexes()` updates them, it multiplies each stored index by the interest factor accrued since the previous reserve update. The liquidity index uses linear interest and the variable-borrow index uses compounded interest, but both factors are at least `1.0` in ray precision: rates are unsigned (and therefore cannot be negative), and elapsed time cannot be negative.
+
+Consequently, an update can either leave an index unchanged—for example, when no time has elapsed, the applicable rate is zero, or the reserve has no outstanding debt—or increase it. Neither cumulative index can decrease under this design. A decrease would require a negative interest factor or an explicit downward adjustment mechanism, neither of which exists here.
 
 ## Depositor Liquidity Checkpoint
 

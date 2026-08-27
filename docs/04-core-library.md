@@ -1400,6 +1400,28 @@ The idea is:
 newLiquidityIndex = linearInterest * previousLiquidityIndex
 ```
 
+### Example: Two Years with Different Liquidity Rates
+
+The liquidity index starts at `1.00` and represents the reserve's cumulative growth since the beginning.
+
+Assume the liquidity rate is `5%` for the first full year and `2%` for the second full year. At each reserve update, the new linear-interest factor is multiplied by the previous cumulative index:
+
+```text
+start:        1.00
+after year 1: 1.00 * (1 + 0.05) = 1.05
+after year 2: 1.05 * (1 + 0.02) = 1.071
+```
+
+The final `lastLiquidityCumulativeIndex` is therefore `1.071`, meaning the reserve has grown by `7.1%` in total.
+
+For example, a user who deposited `100 DAI` when the index was `1.00` has a current balance of:
+
+```text
+currentBalance = 100 * 1.071 / 1.00 = 107.1 DAI
+```
+
+Although each individual update uses linear interest for its elapsed period, multiplying each new factor into the cumulative index preserves growth across successive periods.
+
 ## Variable Borrow Index Update
 
 The variable borrow index is updated using compounded interest:
@@ -1417,6 +1439,28 @@ The idea is:
 ```text
 newVariableBorrowIndex = compoundedVariableBorrowInterest * previousVariableBorrowIndex
 ```
+
+### Example: Two Years with Different Variable Borrow Rates
+
+`cumulatedVariableBorrowInterest` is the compounded-interest factor for the time since the previous reserve update. It is then multiplied into `lastVariableBorrowCumulativeIndex`, which starts at `1.00` and tracks the reserve's cumulative variable-borrow growth.
+
+Assume the variable borrow rate is `5%` for the first full year and `2%` for the second full year. Because `calculateCompoundedInterest` compounds per second, the one-year factors are approximately `1.05127` and `1.02020`:
+
+```text
+start:        1.00000
+after year 1: 1.00000 * 1.05127 = 1.05127
+after year 2: 1.05127 * 1.02020 ≈ 1.07251
+```
+
+The final `lastVariableBorrowCumulativeIndex` is approximately `1.07251`, so variable debt has grown by about `7.251%` in total.
+
+For example, a user who borrowed `100 DAI` when the variable borrow index was `1.00` owes approximately:
+
+```text
+currentDebt = 100 * 1.07251 / 1.00 ≈ 107.251 DAI
+```
+
+The user-level formula produces the same result as accruing interest on that borrow period by period; the indexes store the cumulative multiplier instead of updating every borrower's debt on each reserve update.
 
 # calculateLinearInterest
 

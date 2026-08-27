@@ -227,7 +227,6 @@ library CoreLibrary {
      * @dev Updates the liquidity cumulative index Ci and variable borrow cumulative index Bvc. Refer to the whitepaper for
      * a formal specification.
      * @param _self the reserve object
-     *
      */
     function updateCumulativeIndexes(ReserveData storage _self) internal {
         uint256 totalBorrows = getTotalBorrows(_self);
@@ -401,11 +400,8 @@ library CoreLibrary {
 
     /**
      * @dev returns the ongoing normalized income for the reserve.
-     * a value of 1e27 means there is no income. As time passes, the income is accrued.
-     * A value of 2*1e27 means that the income of the reserve is double the initial amount.
      * @param _reserve the reserve object
      * @return the normalized income. expressed in ray
-     *
      */
     function getNormalizedIncome(CoreLibrary.ReserveData storage _reserve) internal view returns (uint256) {
         // Current normalized income: linearInterest * lastLiquidityCumulativeIndex.
