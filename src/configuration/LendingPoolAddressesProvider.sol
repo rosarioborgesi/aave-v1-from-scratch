@@ -157,7 +157,7 @@ contract LendingPoolAddressesProvider is Ownable, AddressStorage {
         return getAddress(LENDING_POOL_CORE);
     }
 
-    function getLendingPoolConfigurator() public view returns (address) {
+    function getLendingPoolConfigurator() external view returns (address) {
         return getAddress(LENDING_POOL_CONFIGURATOR);
     }
 
