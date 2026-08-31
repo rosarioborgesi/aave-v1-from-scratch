@@ -164,7 +164,12 @@ contract LendingPoolCore {
         external
         onlyLendingPool
     {
+        // Recalculates cumulative indexes: lastLiquidityCumulativeIndex and lastVariableBorrowCumulativeIndex 
+        // at old rates (pre-deposit) (currentLiquidityRate and currentVariableBorrowRate) 
         s_reserves[_reserve].updateCumulativeIndexes();
+
+        // Calculates stores post-deposit rates: currentLiquidityRate, currentStableBorrowRate, currentVariableBorrowRate
+        // Updates the reserve timestamp
         _updateReserveInterestRatesAndTimestamp(_reserve, _amount, 0);
 
         if (_isFirstDeposit) {

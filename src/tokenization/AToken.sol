@@ -268,24 +268,6 @@ contract AToken is ERC20 {
     //       Public Functions     //
     ////////////////////////////////
 
-    /**
-     * @dev calculates the balance of the user, including interest accrued on their principal balance.
-     * @param _user the user for which the balance is being calculated
-     * @return the total balance of the user
-     *
-     */
-    function balanceOf(address _user) public view override returns (uint256) {
-        // Current principal balance of the user
-        uint256 currentPrincipalBalance = super.balanceOf(_user);
-
-        if (currentPrincipalBalance == 0) {
-            return 0;
-        }
-
-        // Accrue the user's interest
-        return _calculateCumulatedBalance(_user, currentPrincipalBalance);
-    }
-
     //////////////////////////////////
     //       Internal Functions     //
     //////////////////////////////////
@@ -307,19 +289,6 @@ contract AToken is ERC20 {
         uint256 index = s_userIndexes[_user] = i_core.getReserveNormalizedIncome(i_underlyingAssetAddress);
 
         return (previousPrincipalBalance, previousPrincipalBalance + balanceIncrease, balanceIncrease, index);
-    }
-
-    /**
-     * @dev calculate the interest accrued by _user on a specific balance
-     * @param _user the address of the user for which the interest is being accumulated
-     * @param _balance the balance on which the interest is calculated
-     * @return The balance including the interest accrued since the user's last index update
-     *
-     */
-    function _calculateCumulatedBalance(address _user, uint256 _balance) internal view returns (uint256) {
-        // currentBalance = principalBalance * currentReserveNormalizedIncome / userIndex
-        return _balance.wadToRay().rayMul(i_core.getReserveNormalizedIncome(i_underlyingAssetAddress))
-            .rayDiv(s_userIndexes[_user]).rayToWad();
     }
 
     /**
@@ -410,6 +379,18 @@ contract AToken is ERC20 {
     //////////////////////////////////////////////////////
     //     Private & Internal View & Pure Functions     //
     //////////////////////////////////////////////////////
+    /**
+     * @dev calculate the interest accrued by _user on a specific balance
+     * @param _user the address of the user for which the interest is being accumulated
+     * @param _balance the balance on which the interest is calculated
+     * @return The balance including the interest accrued since the user's last index update
+     *
+     */
+    function _calculateCumulatedBalance(address _user, uint256 _balance) internal view returns (uint256) {
+        // currentBalance = principalBalance * currentReserveNormalizedIncome / userIndex
+        return _balance.wadToRay().rayMul(i_core.getReserveNormalizedIncome(i_underlyingAssetAddress))
+            .rayDiv(s_userIndexes[_user]).rayToWad();
+    }
 
     //////////////////////////////////////////////////////
     //      External & Public View & Pure Functions     //
@@ -437,6 +418,25 @@ contract AToken is ERC20 {
     }
 
     /**
+     * @dev calculates the balance of the user, including interest accrued on their principal balance.
+     * @param _user the user for which the balance is being calculated
+     * @return the total balance of the user
+     *
+     */
+    function balanceOf(address _user) public view override returns (uint256) {
+        // Current principal balance of the user
+        uint256 currentPrincipalBalance = super.balanceOf(_user);
+
+        if (currentPrincipalBalance == 0) {
+            return 0;
+        }
+
+        // Accrue the user's interest
+        // currentBalance = principalBalance * currentReserveNormalizedIncome / userIndex
+        return _calculateCumulatedBalance(_user, currentPrincipalBalance);
+    }
+
+    /**
      * @dev calculates the total supply of the specific aToken
      * since the balance of every single user increases over time, the total supply
      * does that too.
@@ -449,6 +449,7 @@ contract AToken is ERC20 {
             return 0;
         }
 
+        // totalSupply = supplyPrincipal x reserveNormalizedIncome
         return currentSupplyPrincipal.wadToRay().rayMul(i_core.getReserveNormalizedIncome(i_underlyingAssetAddress))
             .rayToWad();
     }

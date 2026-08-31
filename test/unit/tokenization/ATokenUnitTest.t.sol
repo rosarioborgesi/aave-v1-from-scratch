@@ -202,8 +202,8 @@ contract ATokenUnitTest is Test {
         vm.prank(lendingPool);
         aToken.mintOnDeposit(user, depositAmount);
 
-        assertEq(aToken.principalBalanceOf(user), 125 ether);
-        assertEq(aToken.balanceOf(user), 125 ether);
+        assertEq(aToken.principalBalanceOf(user), 125 ether); // 100 + 5 + 20
+        assertEq(aToken.balanceOf(user), 125 ether); // 100 + 5 + 20
         assertEq(aToken.getUserIndex(user), currentNormalizedIncome);
     }
 

@@ -1386,6 +1386,8 @@ uint256 currentSupplyPrincipal =
     super.totalSupply();
 ```
 
+`super.totalSupply()` is the total aToken balance that has been minted (less any burned tokens)—i.e., the stored “principal” supply before applying accrued interest.
+
 If no aTokens exist:
 
 ```solidity

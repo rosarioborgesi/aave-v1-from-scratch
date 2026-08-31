@@ -136,8 +136,6 @@ contract LendingPoolIntegrationTest is Test {
     //             deposit             //
     /////////////////////////////////////
 
-    // TODO add more tests to extends coverage and edge cases
-
     // This test checks the complete first-deposit flow.
     //
     // The user starts with 100 DAI and the reserve starts empty:
