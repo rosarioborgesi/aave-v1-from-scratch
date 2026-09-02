@@ -136,6 +136,8 @@ contract LendingPoolIntegrationTest is Test {
     //
     // Since this is the first deposit, the reserve is also enabled as
     // collateral for the user.
+    //
+    // No passage of time and no borrow so no interest accrues
     function testDepositTransfersUnderlyingToCoreAndMintsATokens() external {
         uint256 depositAmount = 100 ether;
         uint16 referralCode = 0;
