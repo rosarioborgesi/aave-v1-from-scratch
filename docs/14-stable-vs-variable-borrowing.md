@@ -123,6 +123,25 @@ Bob does **not** receive a weighted-average personal rate. From that point, his 
 
 If the rate remains 10% for another six months, his debt becomes approximately **1,598.13 DAI**.
 
+## How `getCompoundedBorrowBalance` calculates debt
+
+`getCompoundedBorrowBalance` returns a borrower’s current debt, including interest accrued since the position was last updated. It handles stable- and variable-rate debt differently:
+
+- **Stable-rate debt:** compounds the borrower’s stored principal using that borrower’s personal stable rate and the time since their last update.
+
+  ```text
+  debt = principal × compound(userStableRate, userLastUpdate)
+  ```
+
+  The borrower’s rate stays the same unless the position is rebalanced or otherwise changed.
+
+- **Variable-rate debt:** scales the borrower’s stored principal by the growth of the reserve-wide variable-borrow index since the borrower’s last checkpoint. The index captures all variable-rate changes over time.
+
+  ```text
+  debt = principal × currentReserveIndex / userRecordedIndex
+  ```
+
+  If utilization changes and the variable rate changes, every variable borrower’s debt automatically reflects that shared rate history.
 
 ## Stable-borrowing Deprecation 
 Stable borrowing was later deprecated in Aave V3.2. Stable debt had already been used very little, while supporting it required separate debt accounting, rate calculations, and rebalancing logic.
@@ -135,4 +154,3 @@ Variable-rate borrowing remains, with rates adapting automatically to reserve ut
 - Choose **stable** when you want a more predictable borrowing cost.
 - In both cases, interest accrues continuously and is recognized when Aave updates the position.
 - Aave V1 stable borrowing is not a permanent fixed-rate loan: the protocol can rebalance the rate in defined cases.
-

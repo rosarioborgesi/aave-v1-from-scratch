@@ -282,6 +282,8 @@ contract LendingPoolCore {
         // Compound liquidity and variable borrow interest
         // So the protocol accounts for the interest accumulated since the last reserve update
         s_reserves[_reserve].updateCumulativeIndexes();
+
+        // Updates the reserve rates
         _updateReserveInterestRatesAndTimestamp(_reserve, 0, _amountRedeemed);
 
         // If user redeemed everything the useReserveAsCollateral flag is reset
@@ -299,8 +301,10 @@ contract LendingPoolCore {
      */
     function transferToUser(address _reserve, address payable _user, uint256 _amount) external onlyLendingPool {
         if (_reserve != EthAddressLib.ethAddress()) {
+            // ERC20 transfer
             IERC20(_reserve).safeTransfer(_user, _amount);
         } else {
+            // ETH transfer
             (bool result,) = _user.call{value: _amount}("");
             if (!result) {
                 revert LendingPoolCore__EthTransferFailed(_user, _amount);
@@ -1434,12 +1438,15 @@ contract LendingPoolCore {
         CoreLibrary.ReserveData storage reserve = s_reserves[_reserve];
         CoreLibrary.UserReserveData storage user = s_usersReserveData[_user][_reserve];
 
+        // Gets the underlying asset balance of the user
         uint256 underlyingBalance = getUserUnderlyingAssetBalance(_reserve, _user);
 
         if (user.principalBorrowBalance == 0) {
+            // If the user has no debt, return 0 as compounded borrow balance and 0 as fees
             return (underlyingBalance, 0, 0, user.useAsCollateral);
         }
 
+        // If the user has debt calculate the compounded borrow balance
         return (underlyingBalance, user.getCompoundedBorrowBalance(reserve), user.originationFee, user.useAsCollateral);
     }
 

@@ -81,13 +81,14 @@ contract ATokenIntegrationTest is Test {
     //             redeem              //
     /////////////////////////////////////
 
-    // TODO add more tests to extends coverage and edge cases
-
+    // verifies the basic supply → partial withdrawal lifecycle for DAI.
+    // With no time passage or borrowing, no interest has accrued
     function testUserCanDepositAndRedeemUnderlying() external {
         uint256 depositAmount = 100 ether;
         uint16 referralCode = 0;
         uint256 redeemAmount = 40 ether;
 
+        // The user deposits 100 DAI and redeems 40 DAI
         vm.startPrank(user);
         dai.approve(address(core), depositAmount);
         pool.deposit(address(dai), depositAmount, referralCode);
@@ -95,40 +96,52 @@ contract ATokenIntegrationTest is Test {
         aDai.redeem(redeemAmount);
         vm.stopPrank();
 
-        assertEq(dai.balanceOf(user), redeemAmount);
-        assertEq(dai.balanceOf(address(core)), depositAmount - redeemAmount);
-        assertEq(aDai.balanceOf(user), depositAmount - redeemAmount);
-        assertEq(aDai.principalBalanceOf(user), depositAmount - redeemAmount);
+        // No passage of time
+        assertEq(dai.balanceOf(user), redeemAmount); // 40
+        assertEq(dai.balanceOf(address(core)), depositAmount - redeemAmount); // 100 - 40 = 60
+        assertEq(aDai.balanceOf(user), depositAmount - redeemAmount); // 100 - 40 = 60
+        assertEq(aDai.principalBalanceOf(user), depositAmount - redeemAmount); // 100 - 40 = 60
+
+        // Core's DAI balance = 100 - 40 = 60
         assertEq(core.getReserveAvailableLiquidity(address(dai)), depositAmount - redeemAmount);
-        assertEq(aDai.getUserIndex(user), WadRayMath.ray());
+        assertEq(aDai.getUserIndex(user), WadRayMath.ray()); // Unchanged intial index
 
         (uint256 underlyingBalance,,, bool useAsCollateral) = core.getUserBasicReserveData(address(dai), user);
         assertEq(underlyingBalance, depositAmount - redeemAmount);
-        assertTrue(useAsCollateral);
+        assertTrue(useAsCollateral); // DAI still enabled as collateral
     }
 
+    // checks the “withdraw everything”
+    // There is no passage of time, so no interest accrued
     function testUserCanRedeemEntireBalanceWithMaxUintWithoutAccruedInterest() external {
         uint256 depositAmount = 100 ether;
         uint16 referralCode = 0;
 
+        // The user deposits 100 DAI and redeems everything
         vm.startPrank(user);
         dai.approve(address(core), depositAmount);
         pool.deposit(address(dai), depositAmount, referralCode);
         aDai.redeem(type(uint256).max);
         vm.stopPrank();
 
-        assertEq(dai.balanceOf(user), depositAmount);
-        assertEq(dai.balanceOf(address(core)), 0);
+        assertEq(dai.balanceOf(user), depositAmount); // 100
+        assertEq(dai.balanceOf(address(core)), 0); // 0
+        
+        // Core's DAI balance = 0
         assertEq(core.getReserveAvailableLiquidity(address(dai)), 0);
-        assertEq(aDai.balanceOf(user), 0);
-        assertEq(aDai.principalBalanceOf(user), 0);
-        assertEq(aDai.getUserIndex(user), 0);
+
+        assertEq(aDai.balanceOf(user), 0); // 0
+        assertEq(aDai.principalBalanceOf(user), 0); // 0
+        assertEq(aDai.getUserIndex(user), 0);// The user's index is reset under total redeem
 
         (uint256 underlyingBalance,,, bool useAsCollateral) = core.getUserBasicReserveData(address(dai), user);
         assertEq(underlyingBalance, 0);
         assertFalse(useAsCollateral);
     }
 
+    // proves that a partial redemption first records accrued interest, then burns the amount being withdrawn.
+    // There is passage of time, so interest is accrued
+    // There is a  borrow so updateCumulativeIndexes can update the cumulative indexes
     function testRedeemCheckpointsAccruedInterestBeforeBurningPartialBalance() external {
         address liquidityProvider = makeAddr("liquidityProvider");
         uint256 depositAmount = 100 ether;
@@ -177,16 +190,17 @@ contract ATokenIntegrationTest is Test {
         // When you do AToken.redeem(40) it happens this:
         //
         // 1. Calculate current balance: 105
-        // 2. Materialize accred interest: mint 5 aDAI
+        // 2. Materialize accrued interest: mint 5 aDAI
         // 3. Burn the requested 40 aDAI
         // 4. Update the reserve's stored liquidity index to 1.05
         // 5. Transfer 40 DAI to the user
 
-        // The aDAI user balance is: 100 + 5 accrued - 40 redeemed = 65 aDAI
+        assertEq(dai.balanceOf(user), redeemAmount); // 40
 
-        assertEq(dai.balanceOf(user), redeemAmount);
+        // The aDAI user balance is: 100 + 5 accrued - 40 redeemed = 65 aDAI
         assertEq(aDai.principalBalanceOf(user), 65 ether);
         assertEq(aDai.balanceOf(user), 65 ether);
+
         assertEq(aDai.getUserIndex(user), 105e25); // 1.05 ray
 
         // Core DAI balance = 100 DAI (user deposit) + 100 DAI (liquidityProvider deposit) - 20 DAI (secondUser borrow) - 40 DAI (user redeem)

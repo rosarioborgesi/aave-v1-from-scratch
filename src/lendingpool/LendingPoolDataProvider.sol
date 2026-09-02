@@ -101,11 +101,11 @@ contract LendingPoolDataProvider {
     ////////////////////////////////
     //          Functions         //
     ////////////////////////////////
-    constructor(address _addressProvider) {
-        if (_addressProvider == address(0)) {
+    constructor(address _addressesProvider) {
+        if (_addressesProvider == address(0)) {
             revert LendingPoolDataProvider__ZeroAddress();
         }
-        i_addressesProvider = LendingPoolAddressesProvider(_addressProvider);
+        i_addressesProvider = LendingPoolAddressesProvider(_addressesProvider);
 
         address coreAddress = i_addressesProvider.getLendingPoolCore();
         if (coreAddress == address(0)) {
@@ -140,6 +140,7 @@ contract LendingPoolDataProvider {
         uint256 totalFeesETH,
         uint256 liquidationThreshold
     ) internal pure returns (uint256) {
+        // healthFactor = collateral x liquidation threshold / (borrow + fees)
         // healthFactor = collateral adjusted by liquidation threshold / (borrow + fees)
 
         // 1. No borrow = max health factor
@@ -237,6 +238,7 @@ contract LendingPoolDataProvider {
             return true;
         }
 
+        // get the oracle
         IPriceOracleGetter oracle = IPriceOracleGetter(i_addressesProvider.getPriceOracle());
 
         // Convert the decrease amount to ETH
@@ -332,10 +334,10 @@ contract LendingPoolDataProvider {
             vars.currentReserve = reserves[i];
 
             // For each reserve the function asks the core:
-            // How much has this user deposited in this reserve?
-            // How much has this user borrowed in this reserve?
-            // How much origination fee does this user owe?
-            // Is this reserve enabled as collateral by this user?
+            // - How much has this user deposited in this reserve?
+            // - How much has this user borrowed in this reserve?
+            // - How much origination fee does this user owe?
+            // - Is this reserve enabled as collateral by this user?
             (
                 // User's current deposit balance, including accrued interest
                 vars.compoundedLiquidityBalance,

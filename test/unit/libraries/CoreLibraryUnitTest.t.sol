@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, console} from "forge-std/Test.sol";
 import {CoreLibrary} from "src/libraries/CoreLibrary.sol";
 import {WadRayMath} from "src/libraries/WadRayMath.sol";
 
@@ -748,14 +748,12 @@ contract CoreLibraryUnitTest is Test {
         CoreLibrary.ReserveData memory reserveData = _defaultReserveData();
         reserveData.totalBorrowsVariable = principalBorrowBalance;
         reserveData.currentVariableBorrowRate = variableBorrowRate;
-        reserveData.lastVariableBorrowCumulativeIndex = RAY;
+        reserveData.lastVariableBorrowCumulativeIndex = 105e25; // 1.05
         reserveData.lastUpdateTimestamp = lastUpdateTimestamp;
 
         CoreLibrary.UserReserveData memory userReserveData = _defaultUserReserveData();
 
         userReserveData.principalBorrowBalance = principalBorrowBalance;
-
-        userReserveData.lastVariableBorrowCumulativeIndex = RAY;
 
         harness.setReserveData(reserveData);
         harness.setUserReserveData(userReserveData);
@@ -764,26 +762,36 @@ contract CoreLibraryUnitTest is Test {
 
         // Variable debt calculation:
         //
-        // currentReserveVariableIndex =
-        //     compoundedVariableInterest
-        //     * storedReserveVariableIndex
-        //
         // compoundedVariableInterest =
         //     (RAY + variableBorrowRate / SECONDS_PER_YEAR)
         //     ^ SECONDS_PER_YEAR
+        //
+        //     (1e27 + 10e25 / 31,536,000) ^ 31,536,000
+        //     = (1e27 + 3,170,979,198,376,458,650) ^ 31,536,000
+        //     = 1.105170917900423925599112509 ray
         uint256 ratePerSecond = variableBorrowRate / SECONDS_PER_YEAR;
-
         uint256 compoundedVariableInterest = (RAY + ratePerSecond).rayPow(SECONDS_PER_YEAR);
 
-        // Both the stored reserve index and the user checkpoint are 1 ray:
+        // The stored reserve index is 1.05 ray, while the user's checkpoint is 1 ray:
         //
         // cumulatedInterest =
         //     compoundedVariableInterest
-        //     * 1.00
-        //     / 1.00
+        //     * storedReserveVariableIndex
+        //     / storedUserVariableIndex        
+  
+        // cumulatedInterest =        
+        //     1.105170917900423925599112509 ray
+        //     * 1.05
+        //     = 1.160429463795445121879068134 ray
         //
-        // cumulatedInterest = compoundedVariableInterest
-        uint256 expectedBalance = principalBorrowBalance.wadToRay().rayMul(compoundedVariableInterest).rayToWad();
+        // expectedBalance = principalBorrowBalance * cumulatedInterest
+        // expectedBalance = 100 ether * 1.160429463795445121879068134
+        //                 = 116.042946379544512188 ether                            
+        uint256 expectedBalance = principalBorrowBalance.wadToRay()
+            .rayMul(compoundedVariableInterest)
+            .rayMul(reserveData.lastVariableBorrowCumulativeIndex)
+            .rayDiv(userReserveData.lastVariableBorrowCumulativeIndex)
+            .rayToWad();
 
         uint256 compoundedBalance = harness.getCompoundedBorrowBalance();
 

@@ -200,7 +200,7 @@ contract AToken is ERC20 {
             amountToRedeem = currentBalance;
         }
 
-        // Check that the amount to redeem is lower or equal then the user balance
+        // Check that the amount to redeem is lower or equal to the user balance
         if (amountToRedeem > currentBalance) {
             revert AToken__AmountToRedeemGreaterThanCurrentBalance();
         }

@@ -164,6 +164,11 @@ contract LendingPoolDataProviderUnitTest is Test {
     //    calculateUserGlobalData //
     ////////////////////////////////
 
+    // This test registers a reserve and configures it but it deliberately gives user no deposit, borrow or fee balance
+    // The provider skips this reserve because both the user’s supplied and borrowed balances are zero
+    // if (vars.compoundedLiquidityBalance == 0 && vars.compoundedBorrowBalance == 0) {
+    //            continue;
+    //     }
     function testCalculateUserGlobalDataReturnsEmptyPositionForUserWithoutBalances() external {
         uint256 decimals = 18;
         uint256 baseLtv = 75;
@@ -194,6 +199,13 @@ contract LendingPoolDataProviderUnitTest is Test {
         assertFalse(healthFactorBelowThreshold);
     }
 
+    // Checks that calculateUserGlobalData combines a user's position across multiple reserves
+
+    // The third reserve is intentionally empty for this user. It proves the continue logic
+    // if (vars.compoundedLiquidityBalance == 0 && vars.compoundedBorrowBalance == 0) {
+    //            continue;
+    //     }
+    // In fact it has liquidityBalance: 0, and borrowBalance: 0,
     function testCalculateUserGlobalDataAggregatesBalancesAcrossReserves() external {
         ReserveScenario memory firstReserveScenario = ReserveScenario({
             decimals: 18,
@@ -308,6 +320,8 @@ contract LendingPoolDataProviderUnitTest is Test {
         assertFalse(healthFactorBelowThreshold);
     }
 
+    // It tests that for a deposit to count as collateral, both flags must be true:
+    // reserveUsageAsCollateralEnabled && userUsesReserveAsCollateral
     function testCalculateUserGlobalDataExcludesCollateralWhenReserveOrUserDoesNotEnableIt() external {
         ReserveScenario memory firstReserveScenario = ReserveScenario({
             decimals: 18,
@@ -360,6 +374,7 @@ contract LendingPoolDataProviderUnitTest is Test {
         assertEq(currentLiquidationThreshold, 0);
     }
 
+    // Tests that an undercollateralized borrower is identified as liquidatable.
     function testCalculateUserGlobalDataMarksHealthFactorBelowThreshold() external {
         ReserveScenario memory reserveScenario = ReserveScenario({
             decimals: 18,

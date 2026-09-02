@@ -105,7 +105,7 @@ Asset A provides more borrowing power because it has a higher LTV.
 
 ## Liquidation Threshold
 
-The liquidation threshold is the percentage of collateral value that counts when deciding whether the position is undercollateralized.
+The liquidation threshold determines when a position becomes liquidatable: when the value of its collateral, is no longer sufficient to cover the debt.
 
 It is normally higher than the LTV. The difference creates a safety margin between the maximum permitted borrow and liquidation.
 
