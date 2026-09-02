@@ -20,38 +20,6 @@ import {LendingPoolLiquidationManager} from "src/lendingpool/LendingPoolLiquidat
 import {CoreLibrary} from "src/libraries/CoreLibrary.sol";
 import {ILendingPoolAddressesProvider} from "src/interfaces/ILendingPoolAddressesProvider.sol";
 
-contract LendingPoolCoreHarness is LendingPoolCore {
-    constructor(address addressesProvider) LendingPoolCore(addressesProvider) {}
-
-    function getUserUseReserveAsCollateral(address user, address reserve) external view returns (bool) {
-        return s_usersReserveData[user][reserve].useAsCollateral;
-    }
-
-    function setReserveActive(address reserve, bool isActive) external {
-        s_reserves[reserve].isActive = isActive;
-    }
-
-    function setReserveFreeze(address reserve, bool isFreezed) external {
-        s_reserves[reserve].isFreezed = isFreezed;
-    }
-
-    function setReserveBorrows(address reserve, uint256 stableBorrows, uint256 variableBorrows) external {
-        s_reserves[reserve].totalBorrowsStable = stableBorrows;
-        s_reserves[reserve].totalBorrowsVariable = variableBorrows;
-    }
-
-    function setReserveConfiguration(
-        address reserve,
-        uint256 baseLtv,
-        uint256 liquidationThreshold,
-        bool usageAsCollateral
-    ) external {
-        s_reserves[reserve].baseLTVasCollateral = baseLtv;
-        s_reserves[reserve].liquidationThreshold = liquidationThreshold;
-        s_reserves[reserve].usageAsCollateralEnabled = usageAsCollateral;
-    }
-}
-
 contract LendingPoolIntegrationTest is Test {
     using WadRayMath for uint256;
 
@@ -63,7 +31,7 @@ contract LendingPoolIntegrationTest is Test {
     address public feeCollector = makeAddr("feeCollector");
 
     LendingPoolAddressesProvider public addressesProvider;
-    LendingPoolCoreHarness public core;
+    LendingPoolCore public core;
     LendingPool public pool;
     LendingPoolDataProvider public dataProvider;
 
@@ -78,7 +46,7 @@ contract LendingPoolIntegrationTest is Test {
         addressesProvider = new LendingPoolAddressesProvider(address(this));
 
         addressesProvider.setLendingPool(makeAddr("temporaryLendingPool"));
-        core = new LendingPoolCoreHarness(address(addressesProvider));
+        core = new LendingPoolCore(address(addressesProvider));
         addressesProvider.setLendingPoolCore(address(core));
 
         dataProvider = new LendingPoolDataProvider(address(addressesProvider));
@@ -108,22 +76,18 @@ contract LendingPoolIntegrationTest is Test {
         vm.startPrank(configurator);
         core.initReserve(address(dai), address(aDai), dai.decimals(), address(interestRateStrategy));
         core.initReserve(address(weth), address(aWeth), weth.decimals(), address(interestRateStrategy));
+        core.enableReserveAsCollateral(address(dai), 75, 80, 105);
+        core.enableBorrowingOnReserve(address(weth), true);
         vm.stopPrank();
 
         // DAI is configured because it is the test user's collateral:
         // - baseLTVasCollateral = 75: deposited DAI supports borrowing up to 75% of its ETH value.
         // - liquidationThreshold = 80: liquidation begins once debt exceeds 80% of DAI collateral value.
         // - usageAsCollateralEnabled = true: DAI deposits are automatically usable as collateral.
-        core.setReserveConfiguration(address(dai), 75, 80, true);
-        vm.prank(configurator);
-        core.setReserveLiquidationBonus(address(dai), 105);
-        vm.prank(configurator);
-
         // WETH is the borrowable asset:
         // - needs borrowing enabled
-        // - it doesn't need collateral parameters (core.setReserveConfiguration) unless a test deposits
+        // - it doesn't need collateral parameters unless a test deposits
         //   WETH and uses that deposit as a collateral
-        core.enableBorrowingOnReserve(address(weth), true);
 
         // 1 ETH = 2,000 DAI, so 1 DAI = 0.0005 ETH.
         priceOracle.setAssetPrice(address(dai), 0.0005 ether);
@@ -195,7 +159,8 @@ contract LendingPoolIntegrationTest is Test {
         uint256 depositAmount = 100 ether;
         uint16 referralCode = 0;
 
-        core.setReserveActive(address(dai), false);
+        vm.prank(configurator);
+        core.deactivateReserve(address(dai));
 
         vm.prank(user);
         vm.expectRevert(LendingPool.LendingPool__ReserveIsNotActive.selector);
@@ -207,7 +172,8 @@ contract LendingPoolIntegrationTest is Test {
         uint256 depositAmount = 100 ether;
         uint16 referralCode = 0;
 
-        core.setReserveFreeze(address(dai), true);
+        vm.prank(configurator);
+        core.freezeReserve(address(dai));
 
         vm.prank(user);
         vm.expectRevert(LendingPool.LendingPool__ReserveIsFrozen.selector);
@@ -363,9 +329,18 @@ contract LendingPoolIntegrationTest is Test {
         pool.deposit(address(dai), firstDepositAmount, referralCode);
         vm.stopPrank();
 
-        // We are simulating a borrow so that CoreLibrary.updateCumulativeIndexes can update its stored cumulative indexes
-        // because totalBorrows > 0
-        core.setReserveBorrows(address(dai), 1 ether, 0);
+        // Create an actual DAI borrow so the reserve has outstanding debt and
+        // CoreLibrary.updateCumulativeIndexes updates its stored indexes.
+        vm.startPrank(configurator);
+        core.enableReserveAsCollateral(address(weth), 75, 80, 105);
+        core.enableBorrowingOnReserve(address(dai), true);
+        vm.stopPrank();
+        weth.mint(secondUser, 1 ether);
+        vm.startPrank(secondUser);
+        weth.approve(address(core), 1 ether);
+        pool.deposit(address(weth), 1 ether, referralCode);
+        pool.borrow(address(dai), 1 ether, uint256(CoreLibrary.InterestRateMode.VARIABLE), referralCode);
+        vm.stopPrank();
         vm.warp(block.timestamp + 365 days);
 
         vm.prank(user);
@@ -399,12 +374,13 @@ contract LendingPoolIntegrationTest is Test {
         // only from 1.05 ray onward.
         assertEq(aDai.getUserIndex(user), 105e25);
 
-        // Only the two underlying deposits entered the core:
+        // The two deposits entered the core, and the real borrow transferred
+        // 1 DAI of that liquidity to the borrower:
         //
-        // core DAI = 100e18 + 20e18
-        // core DAI = 120e18
-        assertEq(dai.balanceOf(address(core)), 120 ether);
-        assertEq(core.getReserveAvailableLiquidity(address(dai)), 120 ether);
+        // core DAI = 100e18 + 20e18 - 1e18
+        // core DAI = 119e18
+        assertEq(dai.balanceOf(address(core)), 119 ether);
+        assertEq(core.getReserveAvailableLiquidity(address(dai)), 119 ether);
     }
 
     // This test checks that native ETH cannot be sent together with an ERC20
@@ -1363,7 +1339,8 @@ contract LendingPoolIntegrationTest is Test {
         AToken aEth = new AToken(address(addressesProvider), eth, 18, "Aave interest bearing ETH", "aETH");
         vm.prank(configurator);
         core.initReserve(eth, address(aEth), 18, address(interestRateStrategy));
-        core.setReserveConfiguration(eth, 75, 80, true);
+        vm.prank(configurator);
+        core.enableReserveAsCollateral(eth, 75, 80, 105);
         vm.prank(configurator);
         core.enableBorrowingOnReserve(eth, true);
         priceOracle.setAssetPrice(eth, 1 ether);
@@ -1427,7 +1404,8 @@ contract LendingPoolIntegrationTest is Test {
 
     function testRepayRevertsWithInactiveReserve() external {
         // Rapaying an inactive WETH reserve should revert
-        core.setReserveActive(address(weth), false);
+        vm.prank(configurator);
+        core.deactivateReserve(address(weth));
         vm.prank(user);
         vm.expectRevert(LendingPool.LendingPool__ReserveIsNotActive.selector);
         pool.repay(address(weth), 1, payable(user));
@@ -1454,7 +1432,8 @@ contract LendingPoolIntegrationTest is Test {
         vm.prank(user);
         pool.borrow(address(weth), 0.02 ether, uint256(CoreLibrary.InterestRateMode.VARIABLE), 0);
         // It freezes WETH after the loan exists
-        core.setReserveFreeze(address(weth), true);
+        vm.prank(configurator);
+        core.freezeReserve(address(weth));
 
         // It proves the borrower can fully repay:
         // The required repayment is 0.02005 WETH (0.02 principal + 0.00005 origination fee)
@@ -1775,7 +1754,8 @@ contract LendingPoolIntegrationTest is Test {
         // Disable DAI globally as collateral after the position is created.
         uint256 borrowAmount = 0.02 ether;
 
-        core.setReserveConfiguration(address(dai), 75, 80, false);
+        vm.prank(configurator);
+        core.disableReserveAsCollateral(address(dai));
         vm.prank(liquidator);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -1794,7 +1774,8 @@ contract LendingPoolIntegrationTest is Test {
         // The test enables that WETH as collateral and enables DAI borrowing,
         // allowing secondUser to borrow 99.79 DAI out of the 100 DAI reserve.
         // Only about 0.21 DAI remains available as actual tokens in the pool.
-        core.setReserveConfiguration(address(weth), 75, 80, true);
+        vm.prank(configurator);
+        core.enableReserveAsCollateral(address(weth), 75, 80, 105);
         vm.prank(configurator);
         core.enableBorrowingOnReserve(address(dai), true);
         vm.prank(secondUser);
