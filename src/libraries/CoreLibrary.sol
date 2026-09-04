@@ -278,6 +278,9 @@ library CoreLibrary {
         // The removed amount is subtracted from the reserve's stable debt
         _reserve.totalBorrowsStable = _reserve.totalBorrowsStable - _amount;
 
+
+        // Calculate the new average rate
+
         // Handle an empty stable-debt pool
         // If no stable debt remains, there is no average stable rate.
         // Returning also prevents division by zero later

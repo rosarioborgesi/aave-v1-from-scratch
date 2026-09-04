@@ -329,7 +329,7 @@ contract LendingPoolCore {
         uint256 _borrowFee,
         CoreLibrary.InterestRateMode _rateMode
     ) external onlyLendingPool returns (uint256, uint256) {
-        // Getting the previous borrow data of the user
+        // Get the previous borrow data of the user
         (uint256 principalBorrowBalance,, uint256 balanceIncrease) = getUserBorrowBalances(_reserve, _user);
 
         // Update the global state of the reserve
@@ -344,7 +344,7 @@ contract LendingPoolCore {
         _updateReserveInterestRatesAndTimestamp(_reserve, 0, _amountBorrowed);
 
         // Return the results
-        // 1. The borrower's final state after the update
+        // 1. The current borrow rate of the user
         // 2. The interest accumulated before this borrow
         return (_getUserCurrentBorrowRate(_reserve, _user), balanceIncrease);
     }
@@ -912,7 +912,7 @@ contract LendingPoolCore {
         // The new principal includes: previous stored principal + accrued interest + new borrowed amount
         uint256 newPrincipalAmount = _principalBalance + _balanceIncrease + _amountBorrowed;
 
-        // 5. Add the complete debt to the new rate mdoe
+        // 5. Add the complete debt to the new rate mode
         if (_newBorrowRateMode == CoreLibrary.InterestRateMode.STABLE) {
             // New mode is stable
 

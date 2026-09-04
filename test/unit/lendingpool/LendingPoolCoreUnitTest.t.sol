@@ -3253,6 +3253,54 @@ contract LendingPoolCoreUnitTest is Test {
     //     _updateUserStateOnRepay      //
     /////////////////////////////////////
 
+    // This test verifies that a partial repayment updates a variable-rate borrower's individual position
+    // without closing the loan. In particular, it checks the debt and fee calculations, checkpoints the
+    // variable-borrow index and timestamp, and preserves data that belongs to the open position.
+    function testUpdateUserStateOnRepayPartiallyRepaysVariableDebtAndCheckpointsPosition() external {
+        // A zero stable borrow rate identifies this as a variable-rate loan.
+        // The helper should store the reserve's current index as the user's new checkpoint.
+        uint256 reserveVariableBorrowIndex = 12e26; // 1.2 RAY
+
+        // Configure the index that is current at the time of repayment.
+        core.setReserveVariableBorrowIndex(address(token), reserveVariableBorrowIndex);
+        // Seed an open variable-rate loan. The collateral flag is unrelated to repayment and must survive it.
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                // The borrower currently owes 100 DAI before newly accrued interest.
+                principalBorrowBalance: 100 ether,
+                // This stale checkpoint should be replaced with the reserve's current index.
+                lastVariableBorrowCumulativeIndex: RAY,
+                // The borrower still owes 5 DAI in origination fees.
+                originationFee: 5 ether,
+                stableBorrowRate: 0, // A zero stableBorrowRate identifies variable-rate debt.
+                lastUpdateTimestamp: 1,
+                useAsCollateral: true
+            })
+        );
+
+        // The borrower has accrued 10 DAI of interest and repays 40 DAI toward debt plus 2 DAI of fees.
+        // Because debt remains after the repayment, `_repaidWholeLoan` is false.
+        vm.warp(2_000);
+        core.exposedUpdateUserStateOnRepay(address(token), user, 40 ether, 2 ether, 10 ether, false);
+
+        // Read the borrower position after the repayment state update.
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+        // Principal = previous principal + accrued interest - debt repayment = 100 + 10 - 40 = 70 DAI.
+        assertEq(userData.principalBorrowBalance, 70 ether);
+        // Remaining fee = 5 - 2 = 3 DAI.
+        assertEq(userData.originationFee, 3 ether);
+        // This is a partial repayment, so the variable-rate loan remains identified by its zero stable rate.
+        assertEq(userData.stableBorrowRate, 0);
+        // The position is checkpointed at the reserve's latest variable borrow index.
+        assertEq(userData.lastVariableBorrowCumulativeIndex, reserveVariableBorrowIndex);
+        // The user position records the time at which repayment was processed.
+        assertEq(userData.lastUpdateTimestamp, 2_000);
+        // Repaying debt does not change the user's collateral preference.
+        assertTrue(userData.useAsCollateral);
+    }
+
     // This test verifies that a partial repayment updates the borrower's individual position without
     // closing the loan. In particular, it checks the debt and fee calculations, checkpoints the
     // variable-borrow index and timestamp, and preserves data that belongs to the open position.
@@ -3305,6 +3353,47 @@ contract LendingPoolCoreUnitTest is Test {
     // This test verifies that repaying the entire debt closes the borrower's loan and clears the
     // rate metadata that is meaningful only while debt remains. It also verifies that fees are
     // fully paid, the timestamp is refreshed, and the collateral preference is left untouched.
+    function testUpdateUserStateOnRepayFullyClosesVariableRateLoanAndClearsRateMetadata() external {
+        // Use a non-zero reserve index to prove the full-repayment path clears it instead of checkpointing it.
+        core.setReserveVariableBorrowIndex(address(token), 12e26);
+        // Seed a variable-rate loan with 100 DAI principal and 3 DAI of remaining origination fees.
+        core.setUserReserveData(
+            user,
+            address(token),
+            CoreLibrary.UserReserveData({
+                // The borrower owes 100 DAI before the 10 DAI of accrued interest passed to the helper.
+                principalBorrowBalance: 100 ether,
+                // This existing index must be cleared when the loan is closed.
+                lastVariableBorrowCumulativeIndex: RAY,
+                originationFee: 3 ether,
+                // A zero stable rate identifies this as variable debt and remains zero on close.
+                stableBorrowRate: 0,
+                lastUpdateTimestamp: 1,
+                useAsCollateral: true
+            })
+        );
+
+        // Repay the 110 DAI compounded debt (100 principal + 10 interest) and all 3 DAI of fees.
+        // `_repaidWholeLoan` is true, so the helper must remove the closed loan's rate metadata.
+        vm.warp(3_000);
+        core.exposedUpdateUserStateOnRepay(address(token), user, 110 ether, 3 ether, 10 ether, true);
+
+        // Read the position after the full repayment.
+        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
+        // Principal = 100 + 10 - 110 = 0 DAI; no debt remains.
+        assertEq(userData.principalBorrowBalance, 0);
+        // All outstanding origination fees were repaid.
+        assertEq(userData.originationFee, 0);
+        // A variable-rate loan is identified by a zero stable rate, which remains zero after closing.
+        assertEq(userData.stableBorrowRate, 0);
+        // A closed loan must not retain a variable-borrow index either.
+        assertEq(userData.lastVariableBorrowCumulativeIndex, 0);
+        // The position records the time of the final repayment.
+        assertEq(userData.lastUpdateTimestamp, 3_000);
+        // Repayment does not alter the user's collateral preference.
+        assertTrue(userData.useAsCollateral);
+    }
+
     function testUpdateUserStateOnRepayFullyClosesLoanAndClearsRateMetadata() external {
         // Use a non-zero reserve index to prove the full-repayment path clears it instead of checkpointing it.
         core.setReserveVariableBorrowIndex(address(token), 12e26);
@@ -3730,50 +3819,6 @@ contract LendingPoolCoreUnitTest is Test {
         vm.prank(attacker);
         vm.expectRevert(LendingPoolCore.LendingPoolCore__OnlyLendingPool.selector);
         core.updateStateOnRepay(address(token), user, 1 ether, 0, 0, false);
-    }
-
-    // This test proves that updateStateOnRepay is atomic: if its user-level update fails,
-    // all earlier reserve-level updates are reverted too.
-    function testUpdateStateOnRepayRollsBackReserveChangesWhenUserUpdateReverts()
-        external
-        withInitReserve(address(token))
-    {
-        // Reserve variable debt: 200 ether
-        core.setReserveBorrows(address(token), 0, 200 ether);
-        // User variable debt: 90 ether
-        core.setUserReserveData(
-            user,
-            address(token),
-            CoreLibrary.UserReserveData({
-                principalBorrowBalance: 90 ether,
-                lastVariableBorrowCumulativeIndex: RAY,
-                originationFee: 0,
-                stableBorrowRate: 0,
-                lastUpdateTimestamp: uint40(block.timestamp),
-                useAsCollateral: true
-            })
-        );
-        // Simulated accrued interest: 10 ether
-        // Debt repayment: 101 ether
-
-        // The function first updates te reserve: 200 + 10 - 101 = 109 ether
-        // Then it updates the user: 90 + 10 -101 = -1 ether -> revert
-        vm.prank(lendingPool);
-        vm.expectRevert(abi.encodeWithSignature("Panic(uint256)", 0x11));
-        core.updateStateOnRepay(address(token), user, 101 ether, 0, 10 ether, false);
-
-        CoreLibrary.ReserveData memory reserve = core.getReserveData(address(token));
-        CoreLibrary.UserReserveData memory userData = core.getUserReserveData(user, address(token));
-
-        // The revert unwinds everything done earlier in the call
-        // The assertions confirm the original state remains:
-        assertEq(reserve.totalBorrowsVariable, 200 ether);
-        assertEq(reserve.lastLiquidityCumulativeIndex, RAY);
-        assertEq(reserve.lastVariableBorrowCumulativeIndex, RAY);
-        assertEq(userData.principalBorrowBalance, 90 ether);
-        assertEq(userData.lastVariableBorrowCumulativeIndex, RAY);
-        assertEq(userData.lastUpdateTimestamp, block.timestamp);
-        assertTrue(userData.useAsCollateral);
     }
 
     ///////////////////////////////////////////

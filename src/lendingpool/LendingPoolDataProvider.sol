@@ -460,6 +460,7 @@ contract LendingPoolDataProvider {
      * @param _amount the amount the user wants to borrow
      * @param _fee the fee for the amount that the user needs to cover
      * @param _userCurrentBorrowBalanceETH the current borrow balance of the user (before the borrow)
+     * @param _userCurrentFeesETH the current accrued fees of the user in ETH (before the borrow)
      * @param _userCurrentLtv the average ltv of the user given his current collateral
      * @return the total amount of collateral in ETH to cover the current borrow balance + the new amount + fee
      */
@@ -471,14 +472,39 @@ contract LendingPoolDataProvider {
         uint256 _userCurrentFeesETH,
         uint256 _userCurrentLtv
     ) external view returns (uint256) {
+        // This function determines  whether a new borrow is permitted under the user’s current LTV limit.
+
         uint256 reserveDecimals = i_core.getReserveDecimals(_reserve);
 
+        // Get the oracle
         IPriceOracleGetter oracle = IPriceOracleGetter(i_addressesProvider.getPriceOracle());
 
+        // Example borrow 1,000 DAI with a 10 DAI fee
+        // - DAI has 18 decimals
+        // - DAI price = 0.0005 ETH
+        // - Existing borrow = 0.5 ETH
+        // - Existing fees = 0.05 ETH
+        // - Current LTV = 75 (75%) 
+
         // It converts the requested borrow amount plus its fee into their ETH-equivalent value
+        // newdebtETH = oraclePrice(reserve) * (borrowAmount + newFee) / 10^reserveDecimals
+
+        // borrowAmount = 1,000 * 10^18
+        // newFee = 10 * 10^18
+
+        // newDebtETH  = 0.0005 ETH * ((1,000 + 10) * 10^18) / 10^18
+        // = 0.0005 ETH * 1,010
+        // = 0.505 ETH
         uint256 requestedBorrowAmountETH = oracle.getAssetPrice(_reserve) * (_amount + _fee) / (10 ** reserveDecimals); // price in ether
 
+        // The required collateral in ETH = debt / LTV
+
         // Add the current already borrowed amount to the amount requested to calculate the total collateral needed.
+        // requiredCollateralETH = (existingBorrowETH + existingFeesETH + newDebtETH) * 100 / currentLtv
+        
+        // requiredCollateralETH = (0.5 ETH + 0.05 ETH + 0.505 ETH) * 100 / 75
+        // = 1.055 ETH * 100 / 75
+        // = 1.406666666666666666 ETH
         uint256 collateralNeededInETH =
             (_userCurrentBorrowBalanceETH + _userCurrentFeesETH + requestedBorrowAmountETH) * 100 / _userCurrentLtv; //LTV is calculated in percentage
 

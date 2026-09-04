@@ -580,17 +580,20 @@ contract LendingPoolIntegrationTest is Test {
         uint256 expectedBorrowFee = 0.00005 ether;
         uint16 referralCode = 0;
 
+        // User deposits 100 DAI
         vm.startPrank(user);
         dai.approve(address(core), depositAmount);
         pool.deposit(address(dai), depositAmount, referralCode);
         vm.stopPrank();
 
+        // Second user deposits 1 WETH
         weth.mint(secondUser, wethLiquidity);
         vm.startPrank(secondUser);
         weth.approve(address(core), wethLiquidity);
         pool.deposit(address(weth), wethLiquidity, referralCode);
         vm.stopPrank();
 
+        // User borrows 0.02 WETH at variable rate
         vm.prank(user);
         pool.borrow(address(weth), borrowAmount, uint256(CoreLibrary.InterestRateMode.VARIABLE), referralCode);
 
@@ -601,7 +604,7 @@ contract LendingPoolIntegrationTest is Test {
         (uint256 principalBorrowBalance, uint256 compoundedBorrowBalance,) =
             core.getUserBorrowBalances(address(weth), user);
         assertEq(principalBorrowBalance, borrowAmount);
-        assertEq(compoundedBorrowBalance, borrowAmount);
+        assertEq(compoundedBorrowBalance, borrowAmount); // No passage of time so no accrued interest
         assertEq(
             uint256(core.getUserCurrentBorrowRateMode(address(weth), user)),
             uint256(CoreLibrary.InterestRateMode.VARIABLE)

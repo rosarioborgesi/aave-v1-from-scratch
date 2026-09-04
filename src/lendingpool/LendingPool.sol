@@ -516,7 +516,7 @@ contract LendingPool is ReentrancyGuard {
             // Example
             // available liquidity = 1,000 tokens
             // maximum percentage = 25%
-            // maximum stable borrow = 250 tokens
+            // maximum stable borrow = 1,000 x 0.25 = 250 tokens
             uint256 maxLoanPercent = s_parametersProvider.getMaxStableRateBorrowSizePercent();
             uint256 maxLoanSizeStable = vars.availableLiquidity * maxLoanPercent / 100;
 
